@@ -45,6 +45,7 @@ class OptionStrike:
 class InstrumentMap:
     timestamp: float
     spot_symbol: str
+    spot_security_id: str         # Dhan security_id for spot ("13" for Nifty)
     spot_ltp: float
     atm_strike: float
     atm_call: OptionStrike
@@ -157,6 +158,29 @@ class InstrumentManager:
     def current_map(self) -> Optional[InstrumentMap]:
         return self._current_map
 
+    def get_dhan_instruments(self) -> list:
+        """Return DhanInstrument list for the WS client to subscribe to.
+        Falls back to just Nifty spot until the first calibration completes.
+        Import is local to avoid circular import with ws_client.
+        """
+        from core.ws_client import DhanInstrument
+
+        # Nifty 50 index is always security_id "13" on NSE_IDX
+        NIFTY_SPOT = DhanInstrument("13", "NSE_IDX", "NIFTY-SPOT")
+
+        imap = self._current_map
+        if imap is None:
+            return [NIFTY_SPOT]
+
+        instruments = [
+            DhanInstrument(imap.spot_security_id, "NSE_IDX", imap.spot_symbol),
+            DhanInstrument(imap.atm_call.security_id, "NSE_FNO", imap.atm_call.symbol),
+            DhanInstrument(imap.atm_put.security_id,  "NSE_FNO", imap.atm_put.symbol),
+            DhanInstrument(imap.otm_call.security_id, "NSE_FNO", imap.otm_call.symbol),
+            DhanInstrument(imap.otm_put.security_id,  "NSE_FNO", imap.otm_put.symbol),
+        ]
+        return [i for i in instruments if i.security_id]  # skip empty IDs
+
     # ------------------------------------------------------------------
     # Mock map (no API needed)
     # ------------------------------------------------------------------
@@ -175,6 +199,7 @@ class InstrumentManager:
         return InstrumentMap(
             timestamp=time.time(),
             spot_symbol=MockTickFeed.SPOT,
+            spot_security_id="0",
             spot_ltp=spot,
             atm_strike=atm,
             atm_call=OptionStrike(
@@ -258,9 +283,14 @@ class InstrumentManager:
         otm_call = find_closest_delta_strike(otm_calls or calls, self._target_delta_mid)
         otm_put  = find_closest_delta_strike(otm_puts  or puts,  self._target_delta_mid)
 
+        # Nifty spot security_id is always "13" on NSE_IDX
+        spot_security_id = "13" if self._instrument_name in ("NIFTY", "NIFTY50") else \
+                           str(data.get("underlyingSecurityId", "13"))
+
         return InstrumentMap(
             timestamp=time.time(),
             spot_symbol=f"{self._instrument_name}-SPOT",
+            spot_security_id=spot_security_id,
             spot_ltp=spot,
             atm_strike=atm_strike,
             atm_call=atm_call,

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import clsx from 'clsx'
 import { fetchConfig, patchConfig, updateToken } from '../hooks/useApi'
 
 type ConfigMap = Record<string, Record<string, unknown>>
@@ -18,12 +19,13 @@ const EDITABLE: Array<{ section: string; key: string; label: string; type: 'numb
 ]
 
 export function ConfigPanel() {
-  const [cfg, setCfg]         = useState<ConfigMap>({})
-  const [saving, setSaving]   = useState<string | null>(null)
-  const [msg, setMsg]         = useState<{ text: string; ok: boolean } | null>(null)
-  const [token, setToken]     = useState('')
+  const [cfg, setCfg]             = useState<ConfigMap>({})
+  const [saving, setSaving]       = useState<string | null>(null)
+  const [msg, setMsg]             = useState<{ text: string; ok: boolean } | null>(null)
+  const [token, setToken]         = useState('')
   const [showToken, setShowToken] = useState(false)
   const [savingToken, setSavingToken] = useState(false)
+  const [togglingMode, setTogglingMode] = useState(false)
 
   useEffect(() => {
     fetchConfig().then(setCfg).catch(() => {})
@@ -32,6 +34,27 @@ export function ConfigPanel() {
   const flash = (text: string, ok: boolean) => {
     setMsg({ text, ok })
     setTimeout(() => setMsg(null), 3500)
+  }
+
+  const isMockMode = cfg['dhan']?.['mock_mode'] !== false
+
+  const toggleMode = async () => {
+    setTogglingMode(true)
+    const newMode = !isMockMode
+    try {
+      await patchConfig('dhan', 'mock_mode', newMode)
+      setCfg(prev => ({ ...prev, dhan: { ...prev['dhan'], mock_mode: newMode } }))
+      flash(
+        newMode
+          ? '✓ Switched to Demo mode — restart service to apply'
+          : '✓ Switched to Live mode — restart service to apply',
+        true
+      )
+    } catch (e: unknown) {
+      flash(`✗ ${e instanceof Error ? e.message : String(e)}`, false)
+    } finally {
+      setTogglingMode(false)
+    }
   }
 
   const handleChange = (section: string, key: string, raw: string) => {
@@ -45,7 +68,7 @@ export function ConfigPanel() {
     setSaving(`${section}.${key}`)
     try {
       await patchConfig(section, key, value)
-      flash(`✓ Saved — ${label(section, key)}`, true)
+      flash(`✓ Saved`, true)
     } catch (e: unknown) {
       flash(`✗ ${e instanceof Error ? e.message : String(e)}`, false)
     } finally {
@@ -58,7 +81,7 @@ export function ConfigPanel() {
     setSavingToken(true)
     try {
       await updateToken(token.trim())
-      flash('✓ Token updated — engine reconnecting', true)
+      flash('✓ Token updated — engine reconnecting with new credentials', true)
       setToken('')
     } catch (e: unknown) {
       flash(`✗ ${e instanceof Error ? e.message : String(e)}`, false)
@@ -67,16 +90,49 @@ export function ConfigPanel() {
     }
   }
 
-  const label = (section: string, key: string) =>
-    EDITABLE.find(f => f.section === section && f.key === key)?.label ?? key
-
   return (
     <div className="font-mono text-xs flex flex-col gap-4">
+
+      {/* ── Live / Demo toggle ── */}
+      <div className="rounded border border-border bg-surface p-3 flex flex-col gap-2">
+        <div className="text-muted uppercase tracking-wider text-[10px]">Data Source</div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={toggleMode}
+            disabled={togglingMode}
+            className={clsx(
+              'flex items-center gap-2 px-3 py-1.5 rounded border transition-colors disabled:opacity-50',
+              isMockMode
+                ? 'border-warn/40 bg-warn/10 text-warn'
+                : 'border-bull/40 bg-bull/10 text-bull'
+            )}
+          >
+            <span className={clsx(
+              'w-2 h-2 rounded-full',
+              isMockMode ? 'bg-warn' : 'bg-bull animate-pulse'
+            )} />
+            {isMockMode ? 'Demo Mode (fake data)' : 'Live Mode (Dhan API)'}
+          </button>
+          <span className="text-muted text-[10px]">
+            {isMockMode
+              ? '→ click to switch to live Nifty data'
+              : '→ click to switch back to demo'}
+          </span>
+        </div>
+        {!isMockMode && (
+          <p className="text-muted text-[10px]">
+            ⚠ Mode change requires service restart:{' '}
+            <span className="text-white">sudo systemctl restart market-sentinel</span>
+          </p>
+        )}
+      </div>
 
       {/* ── Dhan API Token ── */}
       <div className="rounded border border-warn/30 bg-warn/5 p-3 flex flex-col gap-2">
         <div className="text-warn uppercase tracking-wider text-[10px]">Dhan API Token (changes daily)</div>
-        <div className="text-muted text-[10px]">Client ID: <span className="text-white">1102982629</span> (fixed)</div>
+        <div className="text-muted text-[10px]">
+          Client ID: <span className="text-white">1102982629</span> (fixed)
+        </div>
         <div className="flex items-center gap-2">
           <input
             type={showToken ? 'text' : 'password'}
@@ -88,7 +144,7 @@ export function ConfigPanel() {
           />
           <button
             onClick={() => setShowToken(v => !v)}
-            className="shrink-0 px-2 py-1 rounded border border-border text-muted hover:text-white transition-colors"
+            className="shrink-0 px-2 py-1 rounded border border-border text-muted hover:text-white"
           >
             {showToken ? 'Hide' : 'Show'}
           </button>
@@ -96,7 +152,7 @@ export function ConfigPanel() {
             onClick={handleTokenSave}
             disabled={savingToken || !token.trim()}
             className="shrink-0 px-3 py-1 rounded bg-warn/20 hover:bg-warn/40
-                       border border-warn/30 text-warn transition-colors disabled:opacity-40"
+                       border border-warn/30 text-warn disabled:opacity-40"
           >
             {savingToken ? '…' : 'Update'}
           </button>
@@ -105,11 +161,10 @@ export function ConfigPanel() {
 
       {/* ── Flash message ── */}
       {msg && (
-        <div className={`px-2 py-1 rounded border text-xs ${
-          msg.ok
-            ? 'bg-bull/10 border-bull/30 text-bull'
-            : 'bg-bear/10 border-bear/30 text-bear'
-        }`}>
+        <div className={clsx('px-2 py-1 rounded border text-xs', msg.ok
+          ? 'bg-bull/10 border-bull/30 text-bull'
+          : 'bg-bear/10 border-bear/30 text-bear'
+        )}>
           {msg.text}
         </div>
       )}
@@ -119,7 +174,7 @@ export function ConfigPanel() {
         <div className="text-muted uppercase tracking-wider text-[10px]">Engine Parameters</div>
         {EDITABLE.map(({ section, key, label, type }) => {
           const val = String(cfg[section]?.[key] ?? '')
-          const id = `${section}.${key}`
+          const id  = `${section}.${key}`
           return (
             <div key={id} className="flex items-center gap-2">
               <label className="w-44 text-muted shrink-0 leading-tight">{label}</label>
@@ -135,7 +190,7 @@ export function ConfigPanel() {
                 onClick={() => handleSave(section, key)}
                 disabled={saving === id}
                 className="shrink-0 px-2 py-0.5 rounded bg-accent/20 hover:bg-accent/40
-                           border border-accent/30 text-accent transition-colors disabled:opacity-50"
+                           border border-accent/30 text-accent disabled:opacity-50"
               >
                 {saving === id ? '…' : 'Save'}
               </button>
@@ -145,8 +200,8 @@ export function ConfigPanel() {
       </div>
 
       <p className="text-muted text-[10px] leading-relaxed">
-        Changes save to config.yaml instantly. Virtual capital takes effect on next day reset (09:15).
-        The engine runs 24/7 — closing the browser does not stop it.
+        Changes save instantly. Virtual capital takes effect on next day reset (09:15).
+        Closing the browser does NOT stop the engine — it runs 24/7 on the server.
       </p>
     </div>
   )

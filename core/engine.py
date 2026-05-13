@@ -393,9 +393,9 @@ class Engine:
             return MockTickFeed(queue=self._tick_queue)
         return DhanWSClient(
             queue=self._tick_queue,
-            client_id=dhan["client_id"],
-            access_token=dhan["access_token"],
-            instruments=[],   # populated by InstrumentManager in live mode
+            client_id=dhan.get("client_id", ""),
+            access_token=dhan.get("access_token", ""),
+            instrument_provider=self._instrument_manager.get_dhan_instruments,
             reconnect_delay=self._cfg["ws"]["reconnect_delay_seconds"],
         )
 
