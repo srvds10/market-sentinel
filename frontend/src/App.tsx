@@ -87,7 +87,7 @@ export default function App() {
     if (connected) {
       fetch('/api/status')
         .then(r => r.json())
-        .then(d => { if (d.last_heartbeat) setServerStartedAt(d.server_time - (d.last_heartbeat - d.server_time + 1)) })
+        .then(d => { if (d.started_at) setServerStartedAt(d.started_at) })
         .catch(() => {})
     }
   }, [connected])

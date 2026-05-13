@@ -42,6 +42,7 @@ async def get_status(request: Request) -> dict:
         "warmup_remaining":   state.warmup_remaining_seconds,
         "reconnect_count":    state.reconnect_count,
         "instrument_map":     imap,
+        "started_at":         state.started_at,
         "server_time":        time.time(),
         "last_heartbeat":     state.last_heartbeat,
     }

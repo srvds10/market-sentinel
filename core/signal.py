@@ -152,6 +152,7 @@ class SignalEngine:
 
         # One rolling window per tracked symbol
         self._windows: dict[str, RollingWindow] = {}
+        self._last_z_score: float | None = None
 
     # ------------------------------------------------------------------
     # Instrument map wiring
@@ -248,6 +249,7 @@ class SignalEngine:
 
         self._zscore.push(ratio, ts)
         z = self._zscore.zscore(ratio)
+        self._last_z_score = z
 
         if z is None or z < self.config.zscore_threshold:
             return None
@@ -271,6 +273,9 @@ class SignalEngine:
 
     def z_score_sample_count(self) -> int:
         return self._zscore.sample_count()
+
+    def current_z_score(self) -> float | None:
+        return self._last_z_score
 
     def latest_spot(self) -> float | None:
         win = self._windows.get(self._spot_symbol)

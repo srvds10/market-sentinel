@@ -237,20 +237,24 @@ class Engine:
             self._log_tick_csv(tick)
             self._update_state_prices(tick)
 
-            # Advance to ACTIVE after warmup
-            if (self.state.engine_state == EngineState.WARMING_UP
-                    and time.monotonic() >= warmup_end):
-                self.state.engine_state = EngineState.ACTIVE
-                self._execution_engine.reset_day()
-                logger.info("Warmup complete — engine ACTIVE")
+            # Feed signal engine every tick so Z-score baseline builds during warmup
+            signal_candidate: SignalEvent | None = self._signal_engine.on_tick(tick)
+            self.state.z_sample_count = self._signal_engine.z_score_sample_count()
+            self.state.last_z_score = self._signal_engine.current_z_score()
+
+            # Advance to ACTIVE after warmup; track countdown for UI
+            if self.state.engine_state == EngineState.WARMING_UP:
+                remaining = warmup_end - time.monotonic()
+                self.state.warmup_remaining_seconds = max(0.0, remaining)
+                if remaining <= 0:
+                    self.state.engine_state = EngineState.ACTIVE
+                    self._execution_engine.reset_day()
+                    logger.info("Warmup complete — engine ACTIVE")
 
             if self.state.engine_state not in (EngineState.ACTIVE,):
                 continue
 
-            # Feed signal engine
-            signal: SignalEvent | None = self._signal_engine.on_tick(tick)
-            self.state.last_z_score = self._signal_engine._zscore.zscore(0) if False else None
-            self.state.z_sample_count = self._signal_engine.z_score_sample_count()
+            signal = signal_candidate
 
             # Execution: price update on open trade
             closed = self._execution_engine.on_tick(tick.symbol, tick.ltp)
