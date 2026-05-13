@@ -1,6 +1,6 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import clsx from 'clsx'
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 
 import { ZScoreGauge } from './components/ZScoreGauge'
 import { SignalFeed } from './components/SignalFeed'
@@ -30,26 +30,47 @@ function fmtPct(n: number) {
   return `${n >= 0 ? '+' : ''}${(n * 100).toFixed(2)}%`
 }
 
+function useUptime(startedAt: number | undefined) {
+  const [uptime, setUptime] = useState('')
+  useEffect(() => {
+    if (!startedAt) return
+    const tick = () => {
+      const secs = Math.floor(Date.now() / 1000 - startedAt)
+      const h = Math.floor(secs / 3600)
+      const m = Math.floor((secs % 3600) / 60)
+      const s = secs % 60
+      setUptime(`${h}h ${m}m ${s}s`)
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [startedAt])
+  return uptime
+}
+
 export default function App() {
   const [status, setStatus] = useState<Partial<StatusPayload>>({})
   const [priceHistory, setPriceHistory] = useState<Array<{ t: number; spot: number; z: number }>>([])
+  const [pnlHistory, setPnlHistory] = useState<Array<{ t: number; pnl: number }>>([])
   const [liveSignals, setLiveSignals] = useState<Signal[]>([])
   const [tab, setTab] = useState<'blotter' | 'config'>('blotter')
+  const [serverStartedAt, setServerStartedAt] = useState<number>()
 
   const { trades, refresh: refreshTrades } = useTrades(100)
   const { signals, refresh: refreshSignals } = useSignals(30)
+  const uptime = useUptime(serverStartedAt)
 
   const onMessage = useCallback((msg: WSMessage) => {
     if (msg.type === 'status') {
       setStatus(prev => ({ ...prev, ...msg }))
       if (msg.spot_ltp) {
-        setPriceHistory(prev => {
-          const next = [
-            ...prev,
-            { t: Date.now(), spot: msg.spot_ltp!, z: msg.last_z_score ?? 0 },
-          ].slice(-120)   // keep last 120 ticks (~60s)
-          return next
-        })
+        const t = Date.now()
+        setPriceHistory(prev =>
+          [...prev, { t, spot: msg.spot_ltp!, z: msg.last_z_score ?? 0 }].slice(-120)
+        )
+        setPnlHistory(prev =>
+          [...prev, { t, pnl: msg.daily_pnl ?? 0 }].slice(-120)
+        )
       }
     } else if (msg.type === 'signal') {
       setLiveSignals(prev => [msg as Signal, ...prev].slice(0, 30))
@@ -61,75 +82,114 @@ export default function App() {
 
   const connected = useWebSocket(WS_URL, onMessage)
 
+  // Fetch server uptime once on connect
+  useEffect(() => {
+    if (connected) {
+      fetch('/api/status')
+        .then(r => r.json())
+        .then(d => { if (d.last_heartbeat) setServerStartedAt(d.server_time - (d.last_heartbeat - d.server_time + 1)) })
+        .catch(() => {})
+    }
+  }, [connected])
+
   const displaySignals = liveSignals.length > 0 ? liveSignals : signals
   const pnl = status.daily_pnl ?? 0
   const pnlPct = status.daily_pnl_pct ?? 0
+  const warmupPct = status.engine_state === 'WARMING_UP'
+    ? Math.min((status.z_sample_count ?? 0) / 30 * 100, 100)
+    : 100
 
   return (
     <div className="min-h-screen bg-surface text-white font-mono flex flex-col">
+
       {/* ── Top bar ── */}
-      <header className="border-b border-border px-6 py-3 flex items-center gap-6 shrink-0">
+      <header className="border-b border-border px-4 py-2 flex items-center gap-4 shrink-0 flex-wrap">
         <div className="flex items-center gap-2">
-          <span className="text-accent font-semibold text-base">Market Sentinel</span>
+          <span className="text-accent font-semibold">Market Sentinel</span>
           <span className="text-border">|</span>
           <span className={clsx('text-sm', ENGINE_COLORS[status.engine_state ?? 'IDLE'])}>
             ● {status.engine_state ?? 'IDLE'}
           </span>
         </div>
 
-        <div className="flex items-center gap-5 ml-auto text-sm">
+        <div className="flex items-center gap-4 ml-auto text-xs flex-wrap">
+          {/* Uptime */}
+          {uptime && (
+            <div className="flex flex-col items-end">
+              <span className="text-muted text-[9px] uppercase">Uptime</span>
+              <span className="text-white">{uptime}</span>
+            </div>
+          )}
           {/* Spot */}
           <div className="flex flex-col items-end">
-            <span className="text-muted text-[10px] uppercase">NIFTY</span>
+            <span className="text-muted text-[9px] uppercase">NIFTY Spot</span>
             <span className="text-white font-semibold">
               {status.spot_ltp ? fmt(status.spot_ltp, 2) : '—'}
             </span>
           </div>
           {/* ATM */}
           <div className="flex flex-col items-end">
-            <span className="text-muted text-[10px] uppercase">ATM</span>
+            <span className="text-muted text-[9px] uppercase">ATM Option</span>
             <span>{status.atm_ltp ? fmt(status.atm_ltp, 2) : '—'}</span>
           </div>
           {/* Daily P&L */}
           <div className="flex flex-col items-end">
-            <span className="text-muted text-[10px] uppercase">Day P&L</span>
+            <span className="text-muted text-[9px] uppercase">Day P&L</span>
             <span className={clsx('font-semibold', pnl >= 0 ? 'text-bull' : 'text-bear')}>
               {pnl >= 0 ? '+' : ''}₹{fmt(pnl, 0)}
-              <span className="text-xs ml-1 opacity-70">({fmtPct(pnlPct)})</span>
+              <span className="text-[10px] ml-1 opacity-70">({fmtPct(pnlPct)})</span>
             </span>
           </div>
           {/* Capital */}
           <div className="flex flex-col items-end">
-            <span className="text-muted text-[10px] uppercase">Capital</span>
+            <span className="text-muted text-[9px] uppercase">Capital</span>
             <span>₹{status.capital ? fmt(status.capital, 0) : '—'}</span>
           </div>
-          {/* WS indicator */}
-          <div className={clsx('w-2 h-2 rounded-full', connected ? 'bg-bull' : 'bg-bear')}
-               title={connected ? 'Connected' : 'Disconnected'} />
+          {/* Reconnects */}
+          {(status.reconnect_count ?? 0) > 0 && (
+            <div className="flex flex-col items-end">
+              <span className="text-muted text-[9px] uppercase">Reconnects</span>
+              <span className="text-warn">{status.reconnect_count}</span>
+            </div>
+          )}
+          {/* WS dot */}
+          <div
+            className={clsx('w-2 h-2 rounded-full shrink-0', connected ? 'bg-bull animate-pulse' : 'bg-bear')}
+            title={connected ? 'WebSocket connected' : 'Disconnected — reconnecting'}
+          />
         </div>
       </header>
 
-      {/* ── Main grid ── */}
-      <main className="flex-1 grid grid-cols-12 gap-4 p-4 min-h-0">
+      {/* ── Warmup progress bar ── */}
+      {status.engine_state === 'WARMING_UP' && (
+        <div className="h-1 bg-border">
+          <div
+            className="h-full bg-warn transition-all duration-500"
+            style={{ width: `${warmupPct}%` }}
+          />
+        </div>
+      )}
 
-        {/* Left column: Z-score + signal feed */}
-        <aside className="col-span-3 flex flex-col gap-4">
-          <div className="rounded-lg border border-border bg-panel p-4 flex flex-col items-center gap-2">
+      {/* ── Main grid ── */}
+      <main className="flex-1 grid grid-cols-12 gap-3 p-3 min-h-0">
+
+        {/* Left: Z-score + signal feed */}
+        <aside className="col-span-3 flex flex-col gap-3">
+          <div className="rounded-lg border border-border bg-panel p-3 flex flex-col items-center gap-2">
             <ZScoreGauge
               zScore={status.last_z_score ?? null}
               threshold={Z_THRESHOLD}
               sampleCount={status.z_sample_count ?? 0}
             />
-            {/* OTM LTPs */}
-            <div className="w-full grid grid-cols-2 gap-2 text-xs mt-1">
+            <div className="w-full grid grid-cols-2 gap-2 text-xs">
               <div className="bg-surface rounded p-2">
-                <div className="text-muted text-[10px]">OTM CALL</div>
+                <div className="text-muted text-[9px]">OTM CALL</div>
                 <div className="text-bull font-semibold">
                   {status.otm_call_ltp ? fmt(status.otm_call_ltp) : '—'}
                 </div>
               </div>
               <div className="bg-surface rounded p-2">
-                <div className="text-muted text-[10px]">OTM PUT</div>
+                <div className="text-muted text-[9px]">OTM PUT</div>
                 <div className="text-bear font-semibold">
                   {status.otm_put_ltp ? fmt(status.otm_put_ltp) : '—'}
                 </div>
@@ -137,41 +197,73 @@ export default function App() {
             </div>
           </div>
 
-          <div className="rounded-lg border border-border bg-panel p-4 flex-1 min-h-0 overflow-hidden">
+          {/* Signal feed */}
+          <div className="rounded-lg border border-border bg-panel p-3 flex-1 min-h-0 overflow-hidden">
             <SignalFeed signals={displaySignals} />
           </div>
         </aside>
 
-        {/* Centre: price chart + position */}
-        <section className="col-span-6 flex flex-col gap-4">
-          {/* Price + Z-score chart */}
-          <div className="rounded-lg border border-border bg-panel p-4 h-56">
-            <div className="text-muted text-xs uppercase tracking-wider mb-2">
+        {/* Centre: charts + position */}
+        <section className="col-span-6 flex flex-col gap-3">
+
+          {/* Spot + Z-score chart */}
+          <div className="rounded-lg border border-border bg-panel p-3 h-44">
+            <div className="text-muted text-[9px] uppercase tracking-wider mb-1">
               Spot vs Z-Score (last 60s)
             </div>
             {priceHistory.length > 1 ? (
-              <ResponsiveContainer width="100%" height="85%">
+              <ResponsiveContainer width="100%" height="88%">
                 <LineChart data={priceHistory}>
                   <XAxis dataKey="t" hide />
-                  <YAxis yAxisId="spot" domain={['auto', 'auto']} width={60}
-                         tick={{ fill: '#6b7280', fontSize: 10 }} />
-                  <YAxis yAxisId="z" orientation="right" domain={[-3, 3]} width={30}
-                         tick={{ fill: '#6b7280', fontSize: 10 }} />
+                  <YAxis yAxisId="spot" domain={['auto', 'auto']} width={58}
+                         tick={{ fill: '#6b7280', fontSize: 9 }} />
+                  <YAxis yAxisId="z" orientation="right" domain={[-4, 4]} width={28}
+                         tick={{ fill: '#6b7280', fontSize: 9 }} />
                   <Tooltip
-                    contentStyle={{ background: '#1a1d27', border: '1px solid #2a2d3a', fontSize: 11 }}
+                    contentStyle={{ background: '#1a1d27', border: '1px solid #2a2d3a', fontSize: 10 }}
                     formatter={(v: number, name: string) =>
                       [fmt(v, name === 'z' ? 3 : 2), name === 'z' ? 'Z-Score' : 'Spot']}
                     labelFormatter={() => ''}
                   />
+                  <ReferenceLine yAxisId="z" y={Z_THRESHOLD} stroke="#f59e0b" strokeDasharray="4 2" strokeWidth={1} />
                   <Line yAxisId="spot" type="monotone" dataKey="spot"
                         stroke="#6366f1" dot={false} strokeWidth={1.5} />
-                  <Line yAxisId="z"    type="monotone" dataKey="z"
-                        stroke="#f59e0b" dot={false} strokeWidth={1} strokeDasharray="3 2" />
+                  <Line yAxisId="z" type="monotone" dataKey="z"
+                        stroke="#f59e0b" dot={false} strokeWidth={1} />
                 </LineChart>
               </ResponsiveContainer>
             ) : (
               <div className="flex items-center justify-center h-full text-muted text-sm">
-                Waiting for data…
+                {status.engine_state === 'WARMING_UP' ? `Building baseline… ${status.z_sample_count ?? 0}/30 samples` : 'Waiting for data…'}
+              </div>
+            )}
+          </div>
+
+          {/* P&L sparkline */}
+          <div className="rounded-lg border border-border bg-panel p-3 h-28">
+            <div className="text-muted text-[9px] uppercase tracking-wider mb-1">
+              Daily P&L (₹)
+            </div>
+            {pnlHistory.length > 1 ? (
+              <ResponsiveContainer width="100%" height="80%">
+                <LineChart data={pnlHistory}>
+                  <XAxis dataKey="t" hide />
+                  <YAxis domain={['auto', 'auto']} width={58}
+                         tick={{ fill: '#6b7280', fontSize: 9 }} />
+                  <Tooltip
+                    contentStyle={{ background: '#1a1d27', border: '1px solid #2a2d3a', fontSize: 10 }}
+                    formatter={(v: number) => [`₹${fmt(v, 0)}`, 'P&L']}
+                    labelFormatter={() => ''}
+                  />
+                  <ReferenceLine y={0} stroke="#2a2d3a" strokeWidth={1} />
+                  <Line type="monotone" dataKey="pnl"
+                        stroke={pnl >= 0 ? '#22c55e' : '#ef4444'}
+                        dot={false} strokeWidth={1.5} />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-full text-muted text-xs">
+                No P&L data yet
               </div>
             )}
           </div>
@@ -182,20 +274,18 @@ export default function App() {
           {/* Instrument map */}
           {status.instrument_map && (
             <div className="rounded-lg border border-border bg-panel p-3 text-xs">
-              <div className="text-muted text-[10px] uppercase tracking-wider mb-2">
-                Instrument Map
-              </div>
+              <div className="text-muted text-[9px] uppercase tracking-wider mb-2">Instrument Map</div>
               <div className="grid grid-cols-3 gap-2">
                 <div className="bg-surface rounded p-2">
-                  <div className="text-muted">ATM</div>
+                  <div className="text-muted text-[9px]">ATM</div>
                   <div className="text-white font-semibold">{status.instrument_map.atm_strike}</div>
                 </div>
                 <div className="bg-surface rounded p-2">
-                  <div className="text-bull">OTM Call +{status.instrument_map.otm_call_strike - status.instrument_map.atm_strike}</div>
+                  <div className="text-bull text-[9px]">OTM Call +{status.instrument_map.otm_call_strike - status.instrument_map.atm_strike}</div>
                   <div className="text-white">Δ {status.instrument_map.otm_call_delta.toFixed(3)}</div>
                 </div>
                 <div className="bg-surface rounded p-2">
-                  <div className="text-bear">OTM Put -{status.instrument_map.atm_strike - status.instrument_map.otm_put_strike}</div>
+                  <div className="text-bear text-[9px]">OTM Put -{status.instrument_map.atm_strike - status.instrument_map.otm_put_strike}</div>
                   <div className="text-white">Δ {status.instrument_map.otm_put_delta.toFixed(3)}</div>
                 </div>
               </div>
@@ -203,8 +293,8 @@ export default function App() {
           )}
         </section>
 
-        {/* Right column: blotter / config tabs */}
-        <aside className="col-span-3 flex flex-col gap-0">
+        {/* Right: blotter / config */}
+        <aside className="col-span-3 flex flex-col">
           <div className="flex border-b border-border mb-3">
             {(['blotter', 'config'] as const).map(t => (
               <button
@@ -212,36 +302,31 @@ export default function App() {
                 onClick={() => setTab(t)}
                 className={clsx(
                   'flex-1 py-1.5 text-xs uppercase tracking-wider transition-colors',
-                  tab === t
-                    ? 'text-accent border-b-2 border-accent'
-                    : 'text-muted hover:text-white',
+                  tab === t ? 'text-accent border-b-2 border-accent' : 'text-muted hover:text-white',
                 )}
               >
                 {t}
               </button>
             ))}
           </div>
-
-          <div className="rounded-lg border border-border bg-panel p-4 flex-1 overflow-y-auto">
-            {tab === 'blotter'
-              ? <TradeBlotter trades={trades} />
-              : <ConfigPanel />
-            }
+          <div className="rounded-lg border border-border bg-panel p-3 flex-1 overflow-y-auto">
+            {tab === 'blotter' ? <TradeBlotter trades={trades} /> : <ConfigPanel />}
           </div>
         </aside>
       </main>
 
-      {/* Kill switch banner */}
-      {(status.engine_state === 'KILLED') && (
+      {/* ── Kill switch banner ── */}
+      {status.engine_state === 'KILLED' && (
         <div className="bg-bear/20 border-t border-bear text-bear text-center py-2 text-sm font-semibold">
           ⚠ KILL SWITCH ACTIVE — Daily drawdown limit reached. Trading halted for this session.
         </div>
       )}
 
-      {/* Warmup banner */}
+      {/* ── Warmup banner ── */}
       {status.engine_state === 'WARMING_UP' && (
         <div className="bg-warn/10 border-t border-warn/30 text-warn text-center py-1 text-xs">
-          Warming up — building Z-score baseline ({status.z_sample_count ?? 0} samples collected)
+          Warming up — building Z-score baseline ({status.z_sample_count ?? 0} / 30 samples)
+          {' · '}closing the browser will NOT stop the engine
         </div>
       )}
     </div>

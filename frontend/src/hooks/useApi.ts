@@ -56,3 +56,13 @@ export async function patchConfig(section: string, key: string, value: unknown) 
 export async function fetchConfig() {
   return fetcher<Record<string, Record<string, unknown>>>('/api/config')
 }
+
+export async function updateToken(access_token: string) {
+  const res = await fetch('/api/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ access_token }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}

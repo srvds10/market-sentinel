@@ -4,6 +4,8 @@ Config read + live-update endpoints.
 GET  /api/config        — returns current config.yaml values (no secrets)
 POST /api/config        — writes a subset of safe fields back to config.yaml
                           and hot-reloads them into the running engine.
+POST /api/token         — updates Dhan access token in .env and triggers
+                          engine reconnect (no service restart needed).
 
 Only the fields in MUTABLE_KEYS can be changed at runtime to prevent
 accidental credential exposure via the API.
@@ -12,12 +14,13 @@ accidental credential exposure via the API.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -33,6 +36,7 @@ MUTABLE_KEYS = {
     ("execution", "daily_drawdown_kill_pct"),
     ("execution", "morning_filter_start"),
     ("execution", "morning_filter_end"),
+    ("execution", "virtual_capital"),
 }
 
 _SAFE_SECTIONS = ("signal", "execution", "instrument", "ws", "api")
@@ -72,3 +76,39 @@ async def patch_config(patch: ConfigPatch, request: Request) -> dict:
 
     logger.info("Config updated: %s.%s  %s → %s", patch.section, patch.key, old_value, patch.value)
     return {"ok": True, "section": patch.section, "key": patch.key, "value": patch.value}
+
+
+class TokenUpdate(BaseModel):
+    access_token: str
+
+
+@router.post("/token")
+async def update_token(body: TokenUpdate, request: Request) -> dict:
+    """Update Dhan access token in .env and trigger engine WS reconnect."""
+    token = body.access_token.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Token cannot be empty")
+
+    # Update .env file
+    env_path = Path("/opt/market-sentinel/.env")
+    if not env_path.exists():
+        env_path.write_text(f"DHAN_CLIENT_ID=1102982629\nDHAN_ACCESS_TOKEN={token}\n")
+    else:
+        content = env_path.read_text()
+        if "DHAN_ACCESS_TOKEN=" in content:
+            content = re.sub(r"^DHAN_ACCESS_TOKEN=.*$", f"DHAN_ACCESS_TOKEN={token}",
+                             content, flags=re.MULTILINE)
+        else:
+            content += f"\nDHAN_ACCESS_TOKEN={token}\n"
+        env_path.write_text(content)
+
+    # Update running config in memory
+    request.app.state.config.setdefault("dhan", {})["access_token"] = token
+
+    # Signal engine to reconnect WS with new token
+    engine_state = request.app.state.engine_state
+    if hasattr(engine_state, "reconnect_event"):
+        engine_state.reconnect_event.set()
+
+    logger.info("Dhan access token updated — reconnect triggered")
+    return {"ok": True, "message": "Token updated. Engine reconnecting with new credentials."}
