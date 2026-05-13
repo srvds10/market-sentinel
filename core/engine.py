@@ -72,10 +72,13 @@ class AppState:
     warmup_remaining_seconds: float = 0.0
     instrument_map: dict | None = None
     reconnect_count: int = 0
+    started_at: float = field(default_factory=time.time)
     last_heartbeat: float = field(default_factory=time.time)
 
     # broadcast queue: engine writes, FastAPI WS broadcaster reads
     broadcast_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    # set by /api/token to trigger immediate WS reconnect
+    reconnect_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +222,12 @@ class Engine:
 
     async def _process_ticks(self, provider_task: asyncio.Task, warmup_end: float) -> None:
         while not provider_task.done():
+            # Token update triggers immediate reconnect with new credentials
+            if self.state.reconnect_event.is_set():
+                self.state.reconnect_event.clear()
+                logger.info("Reconnect triggered by token update")
+                return
+
             try:
                 tick: Tick = await asyncio.wait_for(
                     self._tick_queue.get(), timeout=1.0
