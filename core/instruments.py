@@ -65,7 +65,7 @@ def _norm_cdf(x: float) -> float:
 
 
 def bs_delta(S: float, K: float, T: float, sigma: float, is_call: bool) -> float:
-    if T <= 0 or S <= 0 or K <= 0:
+    if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
         return (1.0 if S > K else 0.0) if is_call else (-1.0 if S < K else 0.0)
     r  = 0.065
     d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
@@ -199,6 +199,11 @@ class InstrumentManager:
                                    delta=round(delta, 4), ltp=ltp)
                 (calls if is_call else puts).append(obj)
 
+        if not calls or not puts:
+            raise ValueError(
+                f"Option chain returned no strikes for {self._instrument_name} "
+                f"(calls={len(calls)}, puts={len(puts)})"
+            )
         atm_call  = min(calls, key=lambda s: abs(s.strike_price - atm_strike))
         atm_put   = min(puts,  key=lambda s: abs(s.strike_price - atm_strike))
         otm_calls = [c for c in calls if c.strike_price > atm_strike]

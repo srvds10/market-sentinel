@@ -74,6 +74,8 @@ class Database:
         self._db: aiosqlite.Connection | None = None
 
     async def open(self) -> None:
+        if self._db is not None:
+            return
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(self._path)
         self._db.row_factory = aiosqlite.Row

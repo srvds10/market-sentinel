@@ -335,5 +335,7 @@ class ExecutionEngine:
     def _should_kill(self) -> bool:
         if self._kill_active:
             return True
+        if self._day_start_capital <= 0:
+            return False
         loss_pct = (self._day_start_capital - self._capital) / self._day_start_capital
         return loss_pct >= self.config.daily_drawdown_kill_pct
