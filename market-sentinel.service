@@ -1,0 +1,26 @@
+[Unit]
+Description=Market Sentinel — NSE options IV-accumulation trading daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/market-sentinel
+EnvironmentFile=/opt/market-sentinel/.env
+ExecStart=/opt/market-sentinel/.venv/bin/uvicorn api.main:app \
+          --host 0.0.0.0 --port 8000 \
+          --workers 1 \
+          --log-level info
+
+Restart=on-failure
+RestartSec=10
+# Give the process time to flush data on shutdown
+TimeoutStopSec=30
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

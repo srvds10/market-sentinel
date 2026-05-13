@@ -1,0 +1,46 @@
+dhan:
+  client_id: "${DHAN_CLIENT_ID}"
+  access_token: "${DHAN_ACCESS_TOKEN}"
+  ws_url: "wss://api-feed.dhan.co"
+  mock_mode: true   # set false in prod with real credentials
+
+instrument:
+  default: "NIFTY"
+  lot_size: 50
+  tick_size: 0.05
+
+signal:
+  window_seconds: 30          # rolling window for delta calculation
+  min_spot_delta: 2.0         # sideways filter: min spot move in window (points)
+  zscore_threshold: 2.0       # signal fires above this Z-score
+  zscore_lookback_minutes: 20 # lookback for Z-score baseline
+  min_history_samples: 30     # minimum samples before Z-score is trusted
+  target_delta_min: 0.10      # OTM strike delta lower bound
+  target_delta_max: 0.15      # OTM strike delta upper bound
+  recalibration_interval_minutes: 30  # how often to re-anchor ATM/OTM strikes
+
+execution:
+  paper_trading: true
+  virtual_capital: 1000000    # ₹10 lakh
+  max_position_pct: 0.20      # 20% of capital per trade
+  stop_loss_pct: 0.30         # exit if premium drops 30% from entry
+  trailing_stop_activation_pct: 0.20  # activate trailing stop at +20% profit
+  trailing_stop_pct: 0.15     # trail 15% below running peak
+  cooldown_minutes: 15        # lock after any trade close
+  morning_filter_start: "09:15"
+  morning_filter_end: "09:30"
+  force_close_time: "15:15"
+  daily_drawdown_kill_pct: 0.40  # halt if cumulative daily loss >= 40%
+
+ws:
+  warmup_seconds: 300         # 5-min blackout after reconnect
+  reconnect_delay_seconds: 5
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+
+logging:
+  tick_csv_dir: "data/ticks"
+  db_path: "data/market_sentinel.db"
+  log_path: "data/sentinel.log"

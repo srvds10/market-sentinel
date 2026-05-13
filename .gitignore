@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+data/ticks/
+data/*.db
+data/*.log
+*.csv
+node_modules/
+frontend/dist/
+frontend/.vite/
+.DS_Store
