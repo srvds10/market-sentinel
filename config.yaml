@@ -2,7 +2,6 @@ dhan:
   client_id: "${DHAN_CLIENT_ID}"
   access_token: "${DHAN_ACCESS_TOKEN}"
   ws_url: "wss://api-feed.dhan.co"
-  mock_mode: true   # set false in prod with real credentials
 
 instrument:
   default: "NIFTY"

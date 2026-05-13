@@ -25,7 +25,6 @@ export function ConfigPanel() {
   const [token, setToken]         = useState('')
   const [showToken, setShowToken] = useState(false)
   const [savingToken, setSavingToken] = useState(false)
-  const [togglingMode, setTogglingMode] = useState(false)
 
   useEffect(() => {
     fetchConfig().then(setCfg).catch(() => {})
@@ -34,27 +33,6 @@ export function ConfigPanel() {
   const flash = (text: string, ok: boolean) => {
     setMsg({ text, ok })
     setTimeout(() => setMsg(null), 3500)
-  }
-
-  const isMockMode = cfg['dhan']?.['mock_mode'] !== false
-
-  const toggleMode = async () => {
-    setTogglingMode(true)
-    const newMode = !isMockMode
-    try {
-      await patchConfig('dhan', 'mock_mode', newMode)
-      setCfg(prev => ({ ...prev, dhan: { ...prev['dhan'], mock_mode: newMode } }))
-      flash(
-        newMode
-          ? '✓ Switched to Demo mode — restart service to apply'
-          : '✓ Switched to Live mode — restart service to apply',
-        true
-      )
-    } catch (e: unknown) {
-      flash(`✗ ${e instanceof Error ? e.message : String(e)}`, false)
-    } finally {
-      setTogglingMode(false)
-    }
   }
 
   const handleChange = (section: string, key: string, raw: string) => {
@@ -92,40 +70,6 @@ export function ConfigPanel() {
 
   return (
     <div className="font-mono text-xs flex flex-col gap-4">
-
-      {/* ── Live / Demo toggle ── */}
-      <div className="rounded border border-border bg-surface p-3 flex flex-col gap-2">
-        <div className="text-muted uppercase tracking-wider text-[10px]">Data Source</div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={toggleMode}
-            disabled={togglingMode}
-            className={clsx(
-              'flex items-center gap-2 px-3 py-1.5 rounded border transition-colors disabled:opacity-50',
-              isMockMode
-                ? 'border-warn/40 bg-warn/10 text-warn'
-                : 'border-bull/40 bg-bull/10 text-bull'
-            )}
-          >
-            <span className={clsx(
-              'w-2 h-2 rounded-full',
-              isMockMode ? 'bg-warn' : 'bg-bull animate-pulse'
-            )} />
-            {isMockMode ? 'Demo Mode (fake data)' : 'Live Mode (Dhan API)'}
-          </button>
-          <span className="text-muted text-[10px]">
-            {isMockMode
-              ? '→ click to switch to live Nifty data'
-              : '→ click to switch back to demo'}
-          </span>
-        </div>
-        {!isMockMode && (
-          <p className="text-muted text-[10px]">
-            ⚠ Mode change requires service restart:{' '}
-            <span className="text-white">sudo systemctl restart market-sentinel</span>
-          </p>
-        )}
-      </div>
 
       {/* ── Dhan API Token ── */}
       <div className="rounded border border-warn/30 bg-warn/5 p-3 flex flex-col gap-2">

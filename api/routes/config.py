@@ -37,10 +37,9 @@ MUTABLE_KEYS = {
     ("execution", "morning_filter_start"),
     ("execution", "morning_filter_end"),
     ("execution", "virtual_capital"),
-    ("dhan", "mock_mode"),
 }
 
-_SAFE_SECTIONS = ("signal", "execution", "instrument", "ws", "api", "dhan")
+_SAFE_SECTIONS = ("signal", "execution", "instrument", "ws", "api")
 
 
 class ConfigPatch(BaseModel):

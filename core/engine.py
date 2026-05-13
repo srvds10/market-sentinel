@@ -33,7 +33,7 @@ from core.database import Database
 from core.execution import ExecutionConfig, ExecutionEngine, ExitReason
 from core.instruments import InstrumentManager
 from core.signal import SignalConfig, SignalEngine, SignalEvent, Tick
-from core.ws_client import DhanWSClient, MockTickFeed, TickProvider
+from core.ws_client import DhanWSClient, TickProvider
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +147,6 @@ class Engine:
             recalibration_interval_minutes=sig_cfg["recalibration_interval_minutes"],
             target_delta_min=sig_cfg["target_delta_min"],
             target_delta_max=sig_cfg["target_delta_max"],
-            mock_mode=dhan_cfg.get("mock_mode", True),
             dhan_client_id=dhan_cfg.get("client_id", ""),
             dhan_access_token=dhan_cfg.get("access_token", ""),
             instrument_name=self._cfg["instrument"]["default"],
@@ -389,8 +388,6 @@ class Engine:
 
     def _make_provider(self) -> TickProvider:
         dhan = self._cfg["dhan"]
-        if dhan.get("mock_mode", True):
-            return MockTickFeed(queue=self._tick_queue)
         return DhanWSClient(
             queue=self._tick_queue,
             client_id=dhan.get("client_id", ""),
