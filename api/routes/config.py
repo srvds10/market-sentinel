@@ -66,6 +66,17 @@ async def patch_config(patch: ConfigPatch, request: Request) -> dict:
     old_value = cfg[patch.section].get(patch.key)
     cfg[patch.section][patch.key] = patch.value
 
+    # Hot-apply virtual_capital directly into the running execution engine
+    if patch.section == "execution" and patch.key == "virtual_capital":
+        exc = getattr(request.app.state, "execution_engine", None)
+        if exc is not None and not exc.open_trade:
+            new_cap = float(patch.value)
+            exc.config.virtual_capital = new_cap
+            exc._capital = new_cap
+            exc._start_capital = new_cap
+            exc._day_start_capital = new_cap
+            request.app.state.engine_state.capital = new_cap
+
     # Persist to disk
     config_path = getattr(request.app.state, "config_path", "config.yaml")
     try:

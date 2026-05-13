@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
     app.state.config = engine._cfg
     app.state.config_path = _CONFIG_PATH
     app.state.instrument_manager = engine._instrument_manager
+    app.state.execution_engine = engine._execution_engine
 
     # Open DB before engine tasks run
     await engine._db.open()
