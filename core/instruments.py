@@ -202,6 +202,10 @@ class InstrumentManager:
         self._csv_cache_date: Optional[date] = None
         # Live option LTP cache for IV computation: symbol -> (ltp, monotonic_ts)
         self._ltp_cache: dict[str, tuple[float, float]] = {}
+        # Symbol-to-OptionStrike index, rebuilt on each calibration
+        self._strike_index: dict[str, OptionStrike] = {}
+        # Most recent spot price, updated by the engine on every spot tick
+        self._current_spot: float = 0.0
 
     def update_token(self, token: str) -> None:
         """Hot-update the access token and trigger immediate recalibration."""
@@ -245,6 +249,11 @@ class InstrumentManager:
         # Pre-register every grid symbol so windows accumulate history
         # before the active leg ever rolls onto them.
         self._signal_engine.register_symbols(self.all_grid_symbols())
+        # Rebuild symbol → OptionStrike index for O(1) per-tick IV updates
+        self._strike_index = {
+            s.symbol: s
+            for s in imap.all_calls + imap.all_puts
+        }
         logger.info(
             "Calibrated — grid=%d strikes  ATM=%.0f  "
             "OTM call %.0f (Δ=%.3f  IV=%.1f%%)  "
@@ -285,12 +294,33 @@ class InstrumentManager:
         instrument map should be refreshed)."""
         if self._current_map is None or spot <= 0:
             return False
+        self._current_spot = spot
         return self._select_active_for_spot(self._current_map, spot)
 
     def update_option_ltp(self, symbol: str, ltp: float) -> None:
-        """Cache the latest LTP for a grid option symbol (used for IV computation)."""
-        if ltp > 0:
-            self._ltp_cache[symbol] = (ltp, time.monotonic())
+        """Cache LTP and immediately recompute IV/delta for that specific strike.
+
+        Called on every option tick so IV is always as fresh as the last print,
+        not delayed until the next spot tick.  O(1) via the strike index.
+        """
+        if ltp <= 0:
+            return
+        ts = time.monotonic()
+        self._ltp_cache[symbol] = (ltp, ts)
+
+        strike = self._strike_index.get(symbol)
+        spot   = self._current_spot
+        imap   = self._current_map
+        if strike is None or spot <= 0 or imap is None:
+            return
+
+        T  = max(imap.expiry_days, 1) / TRADING_DAYS_YEAR
+        iv = compute_iv(ltp, spot, strike.strike_price, T, strike.is_call,
+                        r=RISK_FREE_RATE)
+        if iv is not None:
+            strike.iv    = round(iv, 4)
+            strike.delta = round(bs_delta(spot, strike.strike_price, T, iv,
+                                          strike.is_call), 4)
 
     def all_grid_symbols(self) -> set[str]:
         """All strike symbols currently subscribed (for window pre-registration)."""
