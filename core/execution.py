@@ -4,11 +4,11 @@ Paper-trade execution engine.
 State machine per trade:
   OPEN  →  CLOSED (exit reason: STOP_LOSS | TRAILING_STOP | DIVERGENCE | TIME_STOP | KILL_SWITCH)
 
-Guards:
-  - Morning filter: only execute between 09:15 and 09:30
+Guards (all time checks evaluated in IST, not server-local time):
+  - Opening blackout: no new trades during 09:15-morning_filter_end
+  - Force-close cutoff: no new trades after force_close_time; open trades get TIME_STOP
   - 15-minute cooldown after any trade close
   - Daily drawdown kill switch: halt if cumulative daily loss >= 40% of start capital
-  - Force-close all open trades at 15:15
   - Max 20% of virtual capital per trade
 """
 
@@ -23,6 +23,7 @@ from enum import Enum
 from typing import Optional
 
 from core.signal import SignalEvent
+from core.timeutil import hhmm_to_minutes, ist_minutes_now
 
 logger = logging.getLogger(__name__)
 
@@ -184,24 +185,28 @@ class ExecutionEngine:
             return EngineBlock.KILL_SWITCH
         if self._open_trade is not None:
             return EngineBlock.POSITION_OPEN
-        if not self._in_morning_window():
+        if not self._in_trading_window():
             return EngineBlock.MORNING_FILTER
         cooldown_seconds = self.config.cooldown_minutes * 60.0
         if time.time() - self._last_close_ts < cooldown_seconds:
             return EngineBlock.COOLDOWN
         return EngineBlock.NONE
 
-    def _in_morning_window(self) -> bool:
-        now = datetime.now()
-        start_h, start_m = map(int, self.config.morning_filter_start.split(":"))
-        end_h,   end_m   = map(int, self.config.morning_filter_end.split(":"))
-        t = now.hour * 60 + now.minute
-        return (start_h * 60 + start_m) <= t <= (end_h * 60 + end_m)
+    def _in_trading_window(self) -> bool:
+        """True only after the opening blackout ends and before force-close.
+
+        Opening blackout = config.morning_filter_start ... morning_filter_end
+        (typically 09:15–09:30, when opening-auction noise is highest).
+        After morning_filter_end and strictly before force_close_time, new
+        trades may open.  All checks are in IST.
+        """
+        now_min   = ist_minutes_now()
+        blackout_end = hhmm_to_minutes(self.config.morning_filter_end)
+        cutoff       = hhmm_to_minutes(self.config.force_close_time)
+        return blackout_end <= now_min < cutoff
 
     def _past_force_close(self) -> bool:
-        now = datetime.now()
-        h, m = map(int, self.config.force_close_time.split(":"))
-        return now.hour * 60 + now.minute >= h * 60 + m
+        return ist_minutes_now() >= hhmm_to_minutes(self.config.force_close_time)
 
     # ------------------------------------------------------------------
     # Open

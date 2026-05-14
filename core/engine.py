@@ -33,6 +33,7 @@ from core.database import Database
 from core.execution import ExecutionConfig, ExecutionEngine, ExitReason
 from core.instruments import InstrumentManager
 from core.signal import SignalConfig, SignalEngine, SignalEvent, Tick
+from core.timeutil import is_weekday_ist, ist_minutes_now
 from core.ws_client import DhanWSClient, TickProvider
 
 logger = logging.getLogger(__name__)
@@ -446,11 +447,10 @@ class Engine:
     @staticmethod
     def _in_market_hours() -> bool:
         """NSE cash/derivatives session: 09:15–15:30 IST, Mon–Fri."""
-        now = datetime.now()
-        if now.weekday() >= 5:
+        if not is_weekday_ist():
             return False
-        minutes = now.hour * 60 + now.minute
-        return (9 * 60 + 15) <= minutes <= (15 * 60 + 30)
+        m = ist_minutes_now()
+        return (9 * 60 + 15) <= m <= (15 * 60 + 30)
 
     def _make_provider(self) -> TickProvider:
         dhan = self._cfg["dhan"]
