@@ -1,15 +1,14 @@
 """
 Tick provider: Dhan HQ live market data WebSocket.
 
-Uses dhanhq.marketfeed.MarketFeed (callback-based) with a bridging
-asyncio.Queue so ticks flow into the engine's event loop cleanly.
+Uses the official dhanhq MarketFeed (v2.1.0+ API):
+  from dhanhq import DhanContext, MarketFeed
 
-Exchange segment integer constants (from dhanhq.marketfeed):
-  IDX=0  NSE=1  NSE_FNO=2
+Exchange segment and subscription constants are class attributes:
+  MarketFeed.IDX, MarketFeed.NSE_FNO, MarketFeed.Ticker etc.
 
-Emits Tick objects into the asyncio.Queue passed at construction.
-instrument_provider is called fresh on every (re)connect so subscriptions
-always reflect the latest ATM/OTM strikes after a 30-minute recalibration.
+run_forever() starts the feed in a background thread. We poll
+get_data() via run_in_executor so the asyncio event loop is never blocked.
 """
 
 from __future__ import annotations
@@ -49,20 +48,25 @@ class TickProvider(ABC):
 
 
 class DhanWSClient(TickProvider):
-    """Live Nifty feed via Dhan HQ WebSocket (dhanhq.marketfeed.MarketFeed).
+    """Live Nifty feed via Dhan HQ WebSocket.
 
-    Reconnects automatically on disconnection. On each (re)connect it
-    calls instrument_provider() to get the freshest strike list from
-    InstrumentManager (updated every 30 minutes).
+    Uses the documented dhanhq v2.1.0+ API:
+        feed = MarketFeed(dhan_context, instruments, version)
+        feed.run_forever()
+        while True:
+            data = feed.get_data()
+
+    Reconnects automatically on disconnection.
     """
 
-    # Maps our exchange segment strings to dhanhq integer constants
-    _EXCHANGE_MAP = {
-        "NSE_IDX":  0,   # IDX
-        "NSE_EQ":   1,   # NSE
-        "NSE_FNO":  2,   # NSE_FNO
-        "NSE_CURR": 3,
-        "BSE_FNO":  8,
+    # Exchange segment string → MarketFeed class constant name
+    # Actual integers: IDX=0, NSE=1, NSE_FNO=2
+    _SEGMENT_ATTR = {
+        "NSE_IDX":  "IDX",
+        "NSE_EQ":   "NSE",
+        "NSE_FNO":  "NSE_FNO",
+        "NSE_CURR": "NSE_CURR",
+        "BSE_FNO":  "BSE_FNO",
     }
 
     def __init__(
@@ -94,10 +98,9 @@ class DhanWSClient(TickProvider):
 
     async def _connect_and_stream(self) -> None:
         try:
-            from dhanhq import marketfeed
-            from dhanhq import dhan_context as dhan_ctx_module
+            from dhanhq import DhanContext, MarketFeed
         except ImportError:
-            logger.error("dhanhq not installed. Run: pip install dhanhq")
+            logger.error("dhanhq not installed — run: pip install dhanhq")
             await asyncio.sleep(30)
             return
 
@@ -109,12 +112,13 @@ class DhanWSClient(TickProvider):
 
         dhan_instruments = []
         for inst in instruments:
-            seg = self._EXCHANGE_MAP.get(inst.exchange_segment)
+            attr = self._SEGMENT_ATTR.get(inst.exchange_segment)
+            seg = getattr(MarketFeed, attr, None) if attr else None
             if seg is None:
                 logger.warning("Unknown exchange segment '%s' for %s — skipping",
                                inst.exchange_segment, inst.symbol)
                 continue
-            dhan_instruments.append((seg, inst.security_id, marketfeed.Ticker))
+            dhan_instruments.append((seg, inst.security_id, MarketFeed.Ticker))
 
         if not dhan_instruments:
             logger.error("No valid instruments after segment mapping")
@@ -126,35 +130,30 @@ class DhanWSClient(TickProvider):
         logger.info("Dhan WS connecting — %d instruments: %s",
                     len(instruments), [i.symbol for i in instruments])
 
-        tick_queue: asyncio.Queue[Tick] = asyncio.Queue()
+        context = DhanContext(self._client_id, self._access_token)
+        feed = MarketFeed(context, dhan_instruments, "v2")
+
         loop = asyncio.get_running_loop()
 
-        def on_message(_feed_obj, data: dict) -> None:
-            tick = self._parse(data, sym_map)
-            if tick:
-                loop.call_soon_threadsafe(tick_queue.put_nowait, tick)
-
-        context = dhan_ctx_module.DhanContext(self._client_id, self._access_token)
-        feed = marketfeed.MarketFeed(
-            context, dhan_instruments, version="v2", on_message=on_message
-        )
-
-        feed_task = asyncio.create_task(feed._run_async())
-        logger.info("Dhan WS connected")
-
         try:
-            while self._running and not feed_task.done():
-                try:
-                    tick = await asyncio.wait_for(tick_queue.get(), timeout=2.0)
-                    await self._emit(tick)
-                except asyncio.TimeoutError:
-                    continue
+            # run_forever() starts the WebSocket in a background thread (non-blocking)
+            feed.run_forever()
+            logger.info("Dhan WS connected")
+
+            while self._running:
+                # get_data() may block briefly — run in executor to keep event loop free
+                data = await loop.run_in_executor(None, feed.get_data)
+                if data:
+                    tick = self._parse(data, sym_map)
+                    if tick:
+                        await self._emit(tick)
+                else:
+                    await asyncio.sleep(0.05)
+
         finally:
-            feed._running = False
-            feed_task.cancel()
             try:
-                await asyncio.wait_for(feed_task, timeout=2.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+                feed.close_connection()
+            except Exception:
                 pass
 
     @staticmethod
