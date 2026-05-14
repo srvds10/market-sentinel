@@ -20,7 +20,7 @@ signal:
 
 execution:
   paper_trading: true
-  virtual_capital: 1000000    # ₹10 lakh
+  virtual_capital: 100000     # ₹1 lakh
   max_position_pct: 0.20      # 20% of capital per trade
   stop_loss_pct: 0.30         # exit if premium drops 30% from entry
   trailing_stop_activation_pct: 0.20  # activate trailing stop at +20% profit
