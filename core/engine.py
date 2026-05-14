@@ -150,6 +150,7 @@ class Engine:
             dhan_client_id=dhan_cfg.get("client_id", ""),
             dhan_access_token=dhan_cfg.get("access_token", ""),
             instrument_name=self._cfg["instrument"]["default"],
+            on_instruments_changed=lambda: self.state.reconnect_event.set(),
         )
 
         self._warmup_seconds: float = self._cfg["ws"]["warmup_seconds"]

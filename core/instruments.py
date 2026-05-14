@@ -87,9 +87,11 @@ def find_closest_delta_strike(strikes: list[OptionStrike], target: float) -> Opt
 class InstrumentManager:
     """Fetches the Dhan option chain and resolves the 5-leg instrument map.
 
-    Recalibrates every 30 minutes so ATM/OTM strikes track a trending market.
-    After each calibration it calls signal_engine.set_instrument_map() to
-    re-anchor all rolling windows to the new symbols.
+    Recalibrates on the configured interval so ATM/OTM strikes track a trending
+    market.  The scrip master CSV is cached for the trading day (it is a static
+    daily file) so only the first calibration of the day downloads it.
+    A WS reconnect is triggered only when the subscribed instruments actually
+    change (i.e. ATM/OTM strike shifted), not on every recalibration tick.
     """
 
     def __init__(
@@ -101,6 +103,7 @@ class InstrumentManager:
         dhan_client_id: str = "",
         dhan_access_token: str = "",
         instrument_name: str = "NIFTY",
+        on_instruments_changed: Optional[callable] = None,
     ) -> None:
         self._signal_engine   = signal_engine
         self._interval        = recalibration_interval_minutes * 60.0
@@ -108,8 +111,12 @@ class InstrumentManager:
         self._dhan_client_id  = dhan_client_id
         self._dhan_access_token = dhan_access_token
         self._instrument_name = instrument_name
+        self._on_instruments_changed = on_instruments_changed
         self._current_map: Optional[InstrumentMap] = None
         self._recalibrate_now = asyncio.Event()
+        # Scrip master CSV cache — valid for one trading day
+        self._csv_cache: Optional[str] = None
+        self._csv_cache_date: Optional[date] = None
 
     def update_token(self, token: str) -> None:
         """Hot-update the access token and trigger immediate recalibration."""
@@ -141,6 +148,7 @@ class InstrumentManager:
 
     async def _calibrate(self) -> None:
         imap = await self._fetch_map()
+        changed = self._instruments_changed(imap)
         self._current_map = imap
         self._signal_engine.set_instrument_map(
             spot_symbol     = imap.spot_symbol,
@@ -150,10 +158,24 @@ class InstrumentManager:
             otm_put_symbol  = imap.otm_put.symbol,
         )
         logger.info(
-            "Calibrated — ATM %.0f | OTM call %.0f (Δ=%.3f) | OTM put %.0f (Δ=%.3f)",
+            "Calibrated — ATM %.0f | OTM call %.0f (Δ=%.3f) | OTM put %.0f (Δ=%.3f)%s",
             imap.atm_strike,
             imap.otm_call.strike_price, imap.otm_call.delta,
             imap.otm_put.strike_price,  imap.otm_put.delta,
+            "  [instruments unchanged]" if not changed else "  [NEW strikes — reconnecting WS]",
+        )
+        if changed and self._on_instruments_changed:
+            self._on_instruments_changed()
+
+    def _instruments_changed(self, new_map: InstrumentMap) -> bool:
+        old = self._current_map
+        if old is None:
+            return True
+        return (
+            new_map.atm_call.security_id != old.atm_call.security_id
+            or new_map.atm_put.security_id  != old.atm_put.security_id
+            or new_map.otm_call.security_id != old.otm_call.security_id
+            or new_map.otm_put.security_id  != old.otm_put.security_id
         )
 
     def current_map(self) -> Optional[InstrumentMap]:
@@ -201,14 +223,22 @@ class InstrumentManager:
         fallback spot source when the WebSocket hasn't connected yet.
         If we have a current_map already, we reuse its spot_ltp.
         """
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(self._SCRIP_MASTER_URL)
-            if not resp.is_success:
-                raise ValueError(
-                    f"Dhan scrip master download failed ({resp.status_code}). "
-                    f"Check internet connectivity."
-                )
-            csv_text = resp.text
+        today = date.today()
+        if self._csv_cache and self._csv_cache_date == today:
+            csv_text = self._csv_cache
+            logger.debug("Scrip master: using cached CSV for %s", today)
+        else:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(self._SCRIP_MASTER_URL)
+                if not resp.is_success:
+                    raise ValueError(
+                        f"Dhan scrip master download failed ({resp.status_code}). "
+                        f"Check internet connectivity."
+                    )
+                csv_text = resp.text
+            self._csv_cache = csv_text
+            self._csv_cache_date = today
+            logger.info("Scrip master: downloaded and cached for %s", today)
 
         # Parse: find nearest weekly/monthly expiry for this instrument
         calls, puts = self._parse_scrip_master(csv_text)
