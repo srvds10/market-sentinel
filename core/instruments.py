@@ -282,6 +282,7 @@ class InstrumentManager:
         rows_by_expiry: dict[date, list[dict]] = {}
         total_rows = 0
         name_upper = self._instrument_name.upper()
+        sample_optidx: list[dict] = []   # for diagnostics on failure
 
         for row in reader:
             total_rows += 1
@@ -293,6 +294,14 @@ class InstrumentManager:
             # Must be an index option contract
             if inst not in ("OPTIDX", "OPTSTK"):
                 continue
+
+            # Capture a few OPTIDX rows for diagnostics in case we find nothing
+            if len(sample_optidx) < 3:
+                sample_optidx.append({
+                    "inst": inst, "sym": sym, "sm_sym": sm_sym,
+                    "opt": opt_raw, "exp": row.get("SEM_EXPIRY_DATE", ""),
+                    "seg": row.get("SEM_SEGMENT", ""),
+                })
 
             # Underlying check: prefer SM_SYMBOL_NAME, fall back to trading symbol prefix
             underlying = sm_sym if sm_sym else sym.upper()
@@ -324,8 +333,9 @@ class InstrumentManager:
 
         if not rows_by_expiry:
             logger.error(
-                "Scrip master: no %s options found after filtering. rows=%d  first_200=%s",
-                self._instrument_name, total_rows, csv_text[:200],
+                "Scrip master: no %s options found. rows=%d  "
+                "sample_OPTIDX_rows=%s",
+                self._instrument_name, total_rows, sample_optidx,
             )
             raise ValueError(
                 f"No upcoming {self._instrument_name} options found in scrip master "
