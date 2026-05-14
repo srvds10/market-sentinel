@@ -374,6 +374,8 @@ class Engine:
         imap = self._instrument_manager.current_map()
         if imap is None:
             return
+        # Feed every option tick into the LTP cache for IV computation
+        self._instrument_manager.update_option_ltp(tick.symbol, tick.ltp)
         if tick.symbol == imap.spot_symbol:
             self.state.spot_ltp = tick.ltp
             # Live re-selection: if ATM/OTM has shifted within the grid, swap

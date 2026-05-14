@@ -38,6 +38,7 @@ class OptionStrike:
     delta: float
     ltp: float
     expiry_days: int = 5  # days to expiry, used for BS delta calc
+    iv: float = 0.0        # implied volatility (0 = not yet computed)
 
 
 @dataclass
@@ -91,6 +92,63 @@ def bs_delta(S: float, K: float, T: float, sigma: float, is_call: bool) -> float
     return _norm_cdf(d1) if is_call else _norm_cdf(d1) - 1.0
 
 
+def bs_price(S: float, K: float, T: float, r: float, sigma: float, is_call: bool) -> float:
+    """Black-Scholes option price."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return max(S - K, 0.0) if is_call else max(K - S, 0.0)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    if is_call:
+        return S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
+    return K * math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+
+
+def bs_vega(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """Vega = dPrice/dSigma (identical for calls and puts)."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    return S * math.sqrt(T) * math.exp(-0.5 * d1 * d1) / math.sqrt(2 * math.pi)
+
+
+def compute_iv(
+    market_price: float,
+    S: float,
+    K: float,
+    T: float,
+    is_call: bool,
+    r: float = 0.065,
+    max_iter: int = 50,
+    tol: float = 1e-6,
+) -> float | None:
+    """Newton–Raphson implied volatility.
+
+    Returns annualised sigma, or None if the price is below intrinsic,
+    vega collapses, or the iteration doesn't converge to within 50 paise.
+    """
+    if T <= 0 or S <= 0 or K <= 0 or market_price <= 0:
+        return None
+    intrinsic = max(S - K, 0.0) if is_call else max(K - S, 0.0)
+    if market_price < intrinsic - 0.01:
+        return None
+
+    sigma = 0.20
+    for _ in range(max_iter):
+        vega = bs_vega(S, K, T, r, sigma)
+        if abs(vega) < 1e-10:
+            break
+        diff = bs_price(S, K, T, r, sigma, is_call) - market_price
+        if abs(diff) < tol:
+            return sigma
+        sigma -= diff / vega
+        sigma = max(0.01, min(sigma, 5.0))
+
+    # Accept if within 50 paise of the target price
+    if abs(bs_price(S, K, T, r, sigma, is_call) - market_price) < 0.50:
+        return sigma
+    return None
+
+
 def find_closest_delta_strike(strikes: list[OptionStrike], target: float) -> OptionStrike:
     return min(strikes, key=lambda s: abs(abs(s.delta) - target))
 
@@ -132,6 +190,8 @@ class InstrumentManager:
         # Scrip master CSV cache — valid for one trading day
         self._csv_cache: Optional[str] = None
         self._csv_cache_date: Optional[date] = None
+        # Live option LTP cache for IV computation
+        self._ltp_cache: dict[str, float] = {}
 
     def update_token(self, token: str) -> None:
         """Hot-update the access token and trigger immediate recalibration."""
@@ -176,12 +236,13 @@ class InstrumentManager:
         # before the active leg ever rolls onto them.
         self._signal_engine.register_symbols(self.all_grid_symbols())
         logger.info(
-            "Calibrated — grid=%d strikes  ATM=%.0f  active OTM call %.0f (Δ=%.3f)  "
-            "OTM put %.0f (Δ=%.3f)%s",
+            "Calibrated — grid=%d strikes  ATM=%.0f  "
+            "OTM call %.0f (Δ=%.3f  IV=%.1f%%)  "
+            "OTM put %.0f (Δ=%.3f  IV=%.1f%%)%s",
             len(imap.all_calls) + len(imap.all_puts),
             imap.atm_strike,
-            imap.otm_call.strike_price, imap.otm_call.delta,
-            imap.otm_put.strike_price,  imap.otm_put.delta,
+            imap.otm_call.strike_price, imap.otm_call.delta, imap.otm_call.iv * 100,
+            imap.otm_put.strike_price,  imap.otm_put.delta,  imap.otm_put.iv * 100,
             "  [grid unchanged]" if not changed else "  [GRID SHIFTED — reconnecting WS]",
         )
         if changed and self._on_instruments_changed:
@@ -215,6 +276,11 @@ class InstrumentManager:
         if self._current_map is None or spot <= 0:
             return False
         return self._select_active_for_spot(self._current_map, spot)
+
+    def update_option_ltp(self, symbol: str, ltp: float) -> None:
+        """Cache the latest LTP for a grid option symbol (used for IV computation)."""
+        if ltp > 0:
+            self._ltp_cache[symbol] = ltp
 
     def all_grid_symbols(self) -> set[str]:
         """All strike symbols currently subscribed (for window pre-registration)."""
@@ -356,28 +422,44 @@ class InstrumentManager:
         logger.info(
             "Scrip master grid built — spot=%.0f ATM=%.0f T=%dd | "
             "calls %s..%s (%d) | puts %s..%s (%d) | "
-            "active OTM call %s (Δ=%.3f) | active OTM put %s (Δ=%.3f)",
+            "active OTM call %s (Δ=%.3f  IV=%.1f%%) | active OTM put %s (Δ=%.3f  IV=%.1f%%)",
             spot, atm_strike, imap.expiry_days,
             int(all_calls[0].strike_price), int(all_calls[-1].strike_price), len(all_calls),
             int(all_puts[0].strike_price),  int(all_puts[-1].strike_price),  len(all_puts),
-            imap.otm_call.symbol, imap.otm_call.delta,
-            imap.otm_put.symbol,  imap.otm_put.delta,
+            imap.otm_call.symbol, imap.otm_call.delta, imap.otm_call.iv * 100,
+            imap.otm_put.symbol,  imap.otm_put.delta,  imap.otm_put.iv * 100,
         )
         return imap
 
     def _select_active_for_spot(self, imap: InstrumentMap, spot: float) -> bool:
         """Re-pick active ATM/OTM strikes from the grid based on live spot.
 
-        Recomputes BS delta against the current spot so OTM selection
-        tracks the moving market.  Returns True if any active leg changed.
+        Recomputes BS delta using live implied vol (Newton–Raphson from market
+        LTP) when available; falls back to sigma=0.14 if no LTP is cached yet.
+        Returns True if any active leg changed.
         """
         is_bank = "BANK" in self._instrument_name
         atm_strike = self._round_to_100(spot) if is_bank else self._round_to_50(spot)
 
-        T     = max(imap.expiry_days, 1) / 252.0
-        sigma = 0.14
+        T = max(imap.expiry_days, 1) / 252.0
+        r = 0.065
+        fallback_sigma = 0.14
+
+        iv_computed = 0
         for s in imap.all_calls + imap.all_puts:
+            ltp = self._ltp_cache.get(s.symbol, 0.0)
+            sigma = fallback_sigma
+            if ltp > 0:
+                iv = compute_iv(ltp, spot, s.strike_price, T, s.is_call, r=r)
+                if iv is not None:
+                    sigma = iv
+                    iv_computed += 1
+            s.iv = round(sigma, 4)
             s.delta = round(bs_delta(spot, s.strike_price, T, sigma, s.is_call), 4)
+
+        if iv_computed:
+            logger.debug("IV computed for %d/%d grid strikes", iv_computed,
+                         len(imap.all_calls) + len(imap.all_puts))
 
         new_atm_call = min(imap.all_calls, key=lambda s: abs(s.strike_price - atm_strike))
         new_atm_put  = min(imap.all_puts,  key=lambda s: abs(s.strike_price - atm_strike))

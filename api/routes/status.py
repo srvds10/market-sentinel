@@ -20,9 +20,11 @@ async def get_status(request: Request) -> dict:
                 "otm_call_symbol":   raw.otm_call.symbol,
                 "otm_call_strike":   raw.otm_call.strike_price,
                 "otm_call_delta":    raw.otm_call.delta,
+                "otm_call_iv":       round(raw.otm_call.iv * 100, 2),
                 "otm_put_symbol":    raw.otm_put.symbol,
                 "otm_put_strike":    raw.otm_put.strike_price,
                 "otm_put_delta":     raw.otm_put.delta,
+                "otm_put_iv":        round(raw.otm_put.iv * 100, 2),
             }
 
     return {
