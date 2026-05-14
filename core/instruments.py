@@ -189,6 +189,10 @@ class InstrumentManager:
         is_index = self._instrument_name in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
         underlying_type = "INDEX" if is_index else "EQUITY"
 
+        tok = self._dhan_access_token
+        logger.info("Calibrating — client_id=%s token=%s…%s (len=%d)",
+                    self._dhan_client_id, tok[:12], tok[-6:], len(tok))
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             # Step 1: get expiry list (ExpiryDate is required by Dhan — cannot be omitted)
             expiry_resp = await client.post(
