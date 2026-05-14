@@ -89,8 +89,8 @@ class DhanWSClient(TickProvider):
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.warning("Dhan WS error: %s — reconnecting in %ss",
-                               exc, self._reconnect_delay)
+                level = logger.error if "disconnect packet" in str(exc) or "code=" in str(exc) else logger.warning
+                level("Dhan WS error: %s — reconnecting in %ss", exc, self._reconnect_delay)
             if self._running:
                 await asyncio.sleep(self._reconnect_delay)
 
@@ -139,11 +139,31 @@ class DhanWSClient(TickProvider):
 
         try:
             while self._running:
-                data = await feed.get_instrument_data()
-                if data:
-                    tick = self._parse(data, sym_map)
-                    if tick:
-                        await self._emit(tick)
+                try:
+                    data = await feed.get_instrument_data()
+                except Exception as recv_exc:
+                    # Capture WebSocket close code/reason when available
+                    code = getattr(recv_exc, "code", None)
+                    reason = getattr(recv_exc, "reason", None)
+                    if code or reason:
+                        raise ConnectionError(
+                            f"Dhan WS closed — code={code} reason={reason!r}"
+                        ) from recv_exc
+                    raise
+
+                if data is None:
+                    # Dhan sent a server-disconnect binary packet (first_byte=50).
+                    # dhanhq prints the reason code (805–809) to stdout; we re-raise
+                    # so the reconnect loop picks it up and the user sees it in the log.
+                    raise ConnectionError(
+                        "Dhan server sent disconnect packet — check journalctl stdout "
+                        "for error code: 807=token expired, 808=bad client ID, "
+                        "809=auth failed, 806=no subscription, 805=too many connections"
+                    )
+
+                tick = self._parse(data, sym_map)
+                if tick:
+                    await self._emit(tick)
         finally:
             try:
                 await feed.disconnect()
