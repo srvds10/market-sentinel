@@ -139,6 +139,9 @@ class Engine:
             force_close_time=exc_cfg["force_close_time"],
             daily_drawdown_kill_pct=exc_cfg["daily_drawdown_kill_pct"],
             lot_size=self._cfg["instrument"]["lot_size"],
+            slippage_rupees=exc_cfg.get("slippage_rupees", 2.0),
+            scale_by_zscore=exc_cfg.get("scale_by_zscore", True),
+            scale_zscore_per_lot=exc_cfg.get("scale_zscore_per_lot", 1.5),
         ))
 
         dhan_cfg = self._cfg["dhan"]
@@ -155,6 +158,7 @@ class Engine:
 
         self._warmup_seconds: float = self._cfg["ws"]["warmup_seconds"]
         self._tick_csv_path: Path | None = None
+        self._stale_tick_timeout: float = self._cfg["ws"].get("stale_tick_timeout_seconds", 15.0)
 
     # ------------------------------------------------------------------
     # Entry point
@@ -221,6 +225,7 @@ class Engine:
             await asyncio.sleep(delay)
 
     async def _process_ticks(self, provider_task: asyncio.Task, warmup_end: float) -> None:
+        last_tick_mono = time.monotonic()
         while not provider_task.done():
             # Token update triggers immediate reconnect with new credentials
             if self.state.reconnect_event.is_set():
@@ -241,7 +246,21 @@ class Engine:
                         self.state.engine_state = EngineState.ACTIVE
                         self._execution_engine.reset_day()
                         logger.info("Warmup complete (no ticks yet) — engine ACTIVE")
+                # Stale-tick detector: TCP may stay open while the feed silently
+                # stalls.  Force a reconnect if no tick arrived in N seconds
+                # during market hours.
+                silent_for = time.monotonic() - last_tick_mono
+                if (silent_for > self._stale_tick_timeout
+                        and self._in_market_hours()
+                        and self.state.engine_state != EngineState.WARMING_UP):
+                    logger.warning(
+                        "No ticks for %.0fs during market hours — forcing reconnect",
+                        silent_for,
+                    )
+                    return
                 continue
+
+            last_tick_mono = time.monotonic()
 
             self._log_tick_csv(tick)
             self._update_state_prices(tick)
@@ -423,6 +442,15 @@ class Engine:
     # ------------------------------------------------------------------
     # Tick provider factory
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _in_market_hours() -> bool:
+        """NSE cash/derivatives session: 09:15–15:30 IST, Mon–Fri."""
+        now = datetime.now()
+        if now.weekday() >= 5:
+            return False
+        minutes = now.hour * 60 + now.minute
+        return (9 * 60 + 15) <= minutes <= (15 * 60 + 30)
 
     def _make_provider(self) -> TickProvider:
         dhan = self._cfg["dhan"]

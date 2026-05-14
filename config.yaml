@@ -30,10 +30,14 @@ execution:
   morning_filter_end: "09:30"
   force_close_time: "15:15"
   daily_drawdown_kill_pct: 0.40  # halt if cumulative daily loss >= 40%
+  slippage_rupees: 2.0        # per-share fill cost on entry & exit (bid-ask)
+  scale_by_zscore: true       # size position by signal strength
+  scale_zscore_per_lot: 1.5   # 1 lot per 1.5σ (Z=2→1 lot, Z=4→2 lots, Z=6→4 lots)
 
 ws:
   warmup_seconds: 300         # 5-min blackout after reconnect
   reconnect_delay_seconds: 5
+  stale_tick_timeout_seconds: 15  # force reconnect if feed silent this long during market hours
 
 api:
   host: "0.0.0.0"

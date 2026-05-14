@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Black-Scholes constants
+# ---------------------------------------------------------------------------
+
+RISK_FREE_RATE     = 0.065     # annualised; used in BS pricing & IV inversion
+FALLBACK_SIGMA     = 0.14      # used until live LTP yields a converged IV
+TRADING_DAYS_YEAR  = 252       # day-count convention for T = days / N
+LTP_STALENESS_SECS = 30.0      # ignore cached LTPs older than this for IV
+
+
+# ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
 
@@ -38,7 +48,7 @@ class OptionStrike:
     delta: float
     ltp: float
     expiry_days: int = 5  # days to expiry, used for BS delta calc
-    iv: float = 0.0        # implied volatility (0 = not yet computed)
+    iv: float = FALLBACK_SIGMA  # implied volatility (annualised)
 
 
 @dataclass
@@ -190,8 +200,8 @@ class InstrumentManager:
         # Scrip master CSV cache — valid for one trading day
         self._csv_cache: Optional[str] = None
         self._csv_cache_date: Optional[date] = None
-        # Live option LTP cache for IV computation
-        self._ltp_cache: dict[str, float] = {}
+        # Live option LTP cache for IV computation: symbol -> (ltp, monotonic_ts)
+        self._ltp_cache: dict[str, tuple[float, float]] = {}
 
     def update_token(self, token: str) -> None:
         """Hot-update the access token and trigger immediate recalibration."""
@@ -280,7 +290,7 @@ class InstrumentManager:
     def update_option_ltp(self, symbol: str, ltp: float) -> None:
         """Cache the latest LTP for a grid option symbol (used for IV computation)."""
         if ltp > 0:
-            self._ltp_cache[symbol] = ltp
+            self._ltp_cache[symbol] = (ltp, time.monotonic())
 
     def all_grid_symbols(self) -> set[str]:
         """All strike symbols currently subscribed (for window pre-registration)."""
@@ -371,10 +381,9 @@ class InstrumentManager:
 
         # Calculate BS delta for each strike (re-computed in select_active_for_spot
         # as spot moves, but we initialise here so the grid has reasonable values)
-        T     = max(calls[0].expiry_days, 1) / 252.0
-        sigma = 0.14
+        T     = max(calls[0].expiry_days, 1) / TRADING_DAYS_YEAR
         for s in calls + puts:
-            s.delta = round(bs_delta(spot, s.strike_price, T, sigma, s.is_call), 4)
+            s.delta = round(bs_delta(spot, s.strike_price, T, FALLBACK_SIGMA, s.is_call), 4)
 
         # Build the grid: 13 calls (2 ITM + ATM + 10 OTM) and 13 puts.
         #   call ITM  → strike < spot
@@ -441,19 +450,21 @@ class InstrumentManager:
         is_bank = "BANK" in self._instrument_name
         atm_strike = self._round_to_100(spot) if is_bank else self._round_to_50(spot)
 
-        T = max(imap.expiry_days, 1) / 252.0
-        r = 0.065
-        fallback_sigma = 0.14
+        T = max(imap.expiry_days, 1) / TRADING_DAYS_YEAR
+        now = time.monotonic()
 
         iv_computed = 0
         for s in imap.all_calls + imap.all_puts:
-            ltp = self._ltp_cache.get(s.symbol, 0.0)
-            sigma = fallback_sigma
-            if ltp > 0:
-                iv = compute_iv(ltp, spot, s.strike_price, T, s.is_call, r=r)
-                if iv is not None:
-                    sigma = iv
-                    iv_computed += 1
+            cached = self._ltp_cache.get(s.symbol)
+            sigma = FALLBACK_SIGMA
+            if cached is not None:
+                ltp, ts = cached
+                if ltp > 0 and (now - ts) <= LTP_STALENESS_SECS:
+                    iv = compute_iv(ltp, spot, s.strike_price, T, s.is_call,
+                                    r=RISK_FREE_RATE)
+                    if iv is not None:
+                        sigma = iv
+                        iv_computed += 1
             s.iv = round(sigma, 4)
             s.delta = round(bs_delta(spot, s.strike_price, T, sigma, s.is_call), 4)
 

@@ -104,6 +104,14 @@ class ExecutionConfig:
     force_close_time: str = "15:15"
     daily_drawdown_kill_pct: float = 0.40
     lot_size: int = 50
+    # Slippage applied per-share on both entry and exit (₹).  A round trip on
+    # 1 lot of an OTM NIFTY weekly costs 2 * slippage_rupees * lot_size.
+    slippage_rupees: float = 2.0
+    # Scale position size by signal strength.  When True, qty = min(max_lots,
+    # ceil(z_score * scale_zscore_per_lot)).  Set scale_zscore_per_lot high to
+    # disable.
+    scale_by_zscore: bool = True
+    scale_zscore_per_lot: float = 1.5    # 1 lot per 1.5σ of signal strength
 
 
 # ---------------------------------------------------------------------------
@@ -210,29 +218,39 @@ class ExecutionEngine:
             logger.debug("Open blocked: %s", block.value)
             return None
 
-        capital_at_risk = self._capital * self.config.max_position_pct
-        qty = max(1, int(capital_at_risk / (atm_ltp * self.config.lot_size)))
-        actual_risk = qty * atm_ltp * self.config.lot_size
+        # Realistic fill: we buy at ask, so entry price = LTP + slippage
+        entry_price = atm_ltp + self.config.slippage_rupees
 
-        stop_loss = atm_ltp * (1.0 - self.config.stop_loss_pct)
+        capital_at_risk = self._capital * self.config.max_position_pct
+        max_lots = max(1, int(capital_at_risk / (entry_price * self.config.lot_size)))
+
+        if self.config.scale_by_zscore and self.config.scale_zscore_per_lot > 0:
+            scaled = max(1, int(signal.z_score / self.config.scale_zscore_per_lot))
+            qty = min(max_lots, scaled)
+        else:
+            qty = max_lots
+
+        actual_risk = qty * entry_price * self.config.lot_size
+        stop_loss = entry_price * (1.0 - self.config.stop_loss_pct)
 
         trade = PaperTrade(
             id=str(uuid.uuid4())[:8],
             opened_at=time.time(),
             symbol=atm_symbol,
             direction=signal.direction,
-            entry_price=atm_ltp,
+            entry_price=entry_price,
             qty=qty,
             capital_at_risk=actual_risk,
             z_score_entry=signal.z_score,
             stop_loss=stop_loss,
-            trailing_high=atm_ltp,
+            trailing_high=entry_price,
             trailing_active=False,
         )
         self._open_trade = trade
         logger.info(
-            "PAPER OPEN  %s  %s @ ₹%.2f  qty=%d  SL=₹%.2f  Z=%.2f",
-            trade.id, trade.symbol, atm_ltp, qty, stop_loss, signal.z_score,
+            "PAPER OPEN  %s  %s @ ₹%.2f (LTP %.2f + slip %.2f)  qty=%d  SL=₹%.2f  Z=%.2f",
+            trade.id, trade.symbol, entry_price, atm_ltp,
+            self.config.slippage_rupees, qty, stop_loss, signal.z_score,
         )
         return trade
 
@@ -298,9 +316,12 @@ class ExecutionEngine:
     # Internal close
     # ------------------------------------------------------------------
 
-    def _close(self, exit_price: float, reason: ExitReason) -> PaperTrade:
+    def _close(self, exit_ltp: float, reason: ExitReason) -> PaperTrade:
         trade = self._open_trade
         assert trade is not None
+
+        # Realistic exit: we sell at bid, so realised price = LTP − slippage
+        exit_price = max(0.0, exit_ltp - self.config.slippage_rupees)
 
         pnl = (exit_price - trade.entry_price) * trade.qty * self.config.lot_size
         pnl_pct = pnl / trade.capital_at_risk if trade.capital_at_risk else 0.0

@@ -37,5 +37,7 @@ def exec_engine():
         force_close_time="23:59",
         daily_drawdown_kill_pct=0.40,
         lot_size=50,
+        slippage_rupees=0.0,     # tests assume frictionless fills
+        scale_by_zscore=False,   # tests assume uncapped sizing
     )
     return ExecutionEngine(cfg)

@@ -144,3 +144,63 @@ class TestExecutionEngine:
         closed = exec_engine.on_tick("WRONG-SYMBOL", 1.0)
         assert closed is None
         assert exec_engine.open_trade is not None
+
+
+def _engine(**overrides) -> ExecutionEngine:
+    cfg = ExecutionConfig(
+        virtual_capital=100_000.0, max_position_pct=0.20, stop_loss_pct=0.30,
+        trailing_stop_activation_pct=0.20, trailing_stop_pct=0.15,
+        cooldown_minutes=0.0, morning_filter_start="00:00", morning_filter_end="23:59",
+        force_close_time="23:59", daily_drawdown_kill_pct=0.40, lot_size=50,
+        slippage_rupees=0.0, scale_by_zscore=False,
+    )
+    for k, v in overrides.items():
+        setattr(cfg, k, v)
+    return ExecutionEngine(cfg)
+
+
+class TestSlippage:
+
+    def test_entry_price_includes_slippage(self):
+        eng = _engine(slippage_rupees=2.0)
+        eng.reset_day()
+        trade = eng.try_open(make_signal(), atm_ltp=100.0, atm_symbol="ATM-CE")
+        assert trade.entry_price == pytest.approx(102.0)
+        assert trade.stop_loss == pytest.approx(102.0 * 0.7)
+
+    def test_round_trip_pnl_subtracts_slippage_twice(self):
+        eng = _engine(slippage_rupees=2.0)
+        eng.reset_day()
+        trade = eng.try_open(make_signal(), atm_ltp=100.0, atm_symbol="ATM-CE")
+        qty = trade.qty
+        # LTP ticks up to 110; we fill at 108 (110 - 2 slippage)
+        closed = eng.trigger_kill_switch(atm_ltp=110.0)
+        assert closed.exit_price == pytest.approx(108.0)
+        # PnL = (108 - 102) * qty * 50
+        assert closed.pnl == pytest.approx(6.0 * qty * 50)
+
+
+class TestZScoreSizing:
+
+    def test_weak_signal_gets_one_lot(self):
+        eng = _engine(scale_by_zscore=True, scale_zscore_per_lot=1.5)
+        eng.reset_day()
+        trade = eng.try_open(make_signal(z=2.0), atm_ltp=10.0, atm_symbol="ATM-CE")
+        # Z=2.0, scale=1.5 → 1 lot (capped by sizing rule, not max_lots)
+        assert trade.qty == 1
+
+    def test_strong_signal_scales_up(self):
+        eng = _engine(scale_by_zscore=True, scale_zscore_per_lot=1.5)
+        eng.reset_day()
+        trade = eng.try_open(make_signal(z=6.0), atm_ltp=10.0, atm_symbol="ATM-CE")
+        # Z=6.0, scale=1.5 → 4 lots (assuming max_lots allows)
+        # max_lots = 20000 / (10 * 50) = 40 lots; sizing caps at 4
+        assert trade.qty == 4
+
+    def test_qty_never_exceeds_capital_cap(self):
+        eng = _engine(scale_by_zscore=True, scale_zscore_per_lot=0.5)
+        eng.reset_day()
+        # Expensive option: capital cap forces small qty even if Z is huge
+        trade = eng.try_open(make_signal(z=10.0), atm_ltp=500.0, atm_symbol="ATM-CE")
+        # max_lots = 20000 / (500 * 50) ≈ 0.8 → max(1, …) = 1
+        assert trade.qty == 1
