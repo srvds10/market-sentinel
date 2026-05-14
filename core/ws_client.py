@@ -59,14 +59,14 @@ class DhanWSClient(TickProvider):
     Reconnects automatically on disconnection.
     """
 
-    # Exchange segment string → MarketFeed class constant name
-    # Actual integers: IDX=0, NSE=1, NSE_FNO=2
+    # Exchange segment string → MarketFeed class constant name + integer fallback
+    # Integers are stable across versions; class attrs preferred when available
     _SEGMENT_ATTR = {
-        "NSE_IDX":  "IDX",
-        "NSE_EQ":   "NSE",
-        "NSE_FNO":  "NSE_FNO",
-        "NSE_CURR": "NSE_CURR",
-        "BSE_FNO":  "BSE_FNO",
+        "NSE_IDX":  ("IDX",      0),
+        "NSE_EQ":   ("NSE",      1),
+        "NSE_FNO":  ("NSE_FNO",  2),
+        "NSE_CURR": ("NSE_CURR", 3),
+        "BSE_FNO":  ("BSE_FNO",  8),
     }
 
     def __init__(
@@ -112,12 +112,13 @@ class DhanWSClient(TickProvider):
 
         dhan_instruments = []
         for inst in instruments:
-            attr = self._SEGMENT_ATTR.get(inst.exchange_segment)
-            seg = getattr(MarketFeed, attr, None) if attr else None
-            if seg is None:
+            entry = self._SEGMENT_ATTR.get(inst.exchange_segment)
+            if entry is None:
                 logger.warning("Unknown exchange segment '%s' for %s — skipping",
                                inst.exchange_segment, inst.symbol)
                 continue
+            attr_name, fallback_int = entry
+            seg = getattr(MarketFeed, attr_name, fallback_int)
             dhan_instruments.append((seg, inst.security_id, MarketFeed.Ticker))
 
         if not dhan_instruments:
