@@ -61,6 +61,7 @@ export default function App() {
   const uptime = useUptime(serverStartedAt)
 
   const onMessage = useCallback((msg: WSMessage) => {
+    if (msg.type === 'ping') return
     if (msg.type === 'status') {
       setStatus(prev => ({ ...prev, ...msg }))
       if (msg.spot_ltp) {

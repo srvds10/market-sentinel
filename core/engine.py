@@ -232,6 +232,14 @@ class Engine:
                     self._tick_queue.get(), timeout=1.0
                 )
             except asyncio.TimeoutError:
+                # Advance through warmup on a timer even if no ticks arrive
+                if self.state.engine_state == EngineState.WARMING_UP:
+                    remaining = warmup_end - time.monotonic()
+                    self.state.warmup_remaining_seconds = max(0.0, remaining)
+                    if remaining <= 0:
+                        self.state.engine_state = EngineState.ACTIVE
+                        self._execution_engine.reset_day()
+                        logger.info("Warmup complete (no ticks yet) — engine ACTIVE")
                 continue
 
             self._log_tick_csv(tick)
