@@ -276,24 +276,30 @@ class InstrumentManager:
         reader = csv.DictReader(io.StringIO(csv_text))
         today  = date.today()
 
-        # Collect all upcoming expiries for this underlying
+        # Collect all upcoming expiries for this underlying.
+        # We rely on symbol prefix + option type rather than rigid segment/instrument
+        # name checks, since Dhan occasionally changes the scrip master schema.
         rows_by_expiry: dict[date, list[dict]] = {}
-        for row in reader:
-            seg  = row.get("SEM_SEGMENT", "")
-            inst = row.get("SEM_INSTRUMENT_NAME", "")
-            sym  = row.get("SEM_TRADING_SYMBOL", "") or row.get("SEM_CUSTOM_SYMBOL", "")
-            opt  = row.get("SEM_OPTION_TYPE", "")
+        seen_segs: set[str] = set()
+        seen_insts: set[str] = set()
+        total_rows = 0
 
-            if seg not in ("NSE_FNO", "NFO"):
-                continue
-            if inst not in ("OPTIDX", "OPTSTK"):
-                continue
+        for row in reader:
+            total_rows += 1
+            seg  = row.get("SEM_SEGMENT", "").strip()
+            inst = row.get("SEM_INSTRUMENT_NAME", "").strip()
+            sym  = (row.get("SEM_TRADING_SYMBOL", "") or row.get("SEM_CUSTOM_SYMBOL", "")).strip()
+            opt  = row.get("SEM_OPTION_TYPE", "").strip()
+
+            seen_segs.add(seg)
+            seen_insts.add(inst)
+
             if opt not in ("CE", "PE"):
                 continue
-            if not sym.startswith(self._instrument_name):
+            if not sym.upper().startswith(self._instrument_name.upper()):
                 continue
 
-            exp_str = row.get("SEM_EXPIRY_DATE", "")
+            exp_str = row.get("SEM_EXPIRY_DATE", "").strip()
             try:
                 exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
             except ValueError:
@@ -307,10 +313,16 @@ class InstrumentManager:
             rows_by_expiry.setdefault(exp_date, []).append(row)
 
         if not rows_by_expiry:
+            logger.error(
+                "Scrip master: no %s options found. rows=%d "
+                "unique_segments=%s unique_instruments=%s  first_line=%s",
+                self._instrument_name, total_rows,
+                sorted(seen_segs)[:10], sorted(seen_insts)[:10],
+                csv_text[:300],
+            )
             raise ValueError(
-                f"No upcoming {self._instrument_name} options found in scrip master. "
-                f"The CSV may have different column names — first line: "
-                f"{csv_text[:200]}"
+                f"No upcoming {self._instrument_name} options found in scrip master "
+                f"(total rows={total_rows})"
             )
 
         nearest_expiry = min(rows_by_expiry)
