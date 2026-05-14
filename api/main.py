@@ -13,22 +13,44 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import logging.handlers
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import config as config_router
+from api.routes import logs as logs_router
 from api.routes import status as status_router
 from api.routes import trades as trades_router
 from api.ws import broadcast_loop, ws_endpoint
 from core.engine import Engine, load_config
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-)
+_LOG_FILE = os.environ.get("SENTINEL_LOG_FILE", "logs/market-sentinel.log")
+
+
+def _setup_logging() -> None:
+    Path(_LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
+    fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
+
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+
+    # Rotating file: 5 MB per file, keep last 3 (≈15 MB total)
+    file_handler = logging.handlers.RotatingFileHandler(
+        _LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    file_handler.setFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(console)
+    root.addHandler(file_handler)
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = os.environ.get("SENTINEL_CONFIG", "config.yaml")
@@ -83,6 +105,7 @@ app.add_middleware(
 app.include_router(status_router.router)
 app.include_router(trades_router.router)
 app.include_router(config_router.router)
+app.include_router(logs_router.router)
 
 
 @app.websocket("/ws/live")

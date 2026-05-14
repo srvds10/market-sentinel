@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
-import { fetchConfig, patchConfig, updateToken } from '../hooks/useApi'
+import { fetchConfig, patchConfig, updateToken, downloadLogs, clearLogs, fetchLogSize } from '../hooks/useApi'
 
 type ConfigMap = Record<string, Record<string, unknown>>
 
@@ -22,12 +22,15 @@ export function ConfigPanel() {
   const [cfg, setCfg]             = useState<ConfigMap>({})
   const [saving, setSaving]       = useState<string | null>(null)
   const [msg, setMsg]             = useState<{ text: string; ok: boolean } | null>(null)
-  const [token, setToken]         = useState('')
-  const [showToken, setShowToken] = useState(false)
+  const [token, setToken]             = useState('')
+  const [showToken, setShowToken]     = useState(false)
   const [savingToken, setSavingToken] = useState(false)
+  const [logSize, setLogSize]         = useState<number | null>(null)
+  const [logBusy, setLogBusy]         = useState(false)
 
   useEffect(() => {
     fetchConfig().then(setCfg).catch(() => {})
+    fetchLogSize().then(r => setLogSize(r.bytes)).catch(() => {})
   }, [])
 
   const flash = (text: string, ok: boolean) => {
@@ -65,6 +68,37 @@ export function ConfigPanel() {
       flash(`✗ ${e instanceof Error ? e.message : String(e)}`, false)
     } finally {
       setSavingToken(false)
+    }
+  }
+
+  const fmtSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+  }
+
+  const handleDownloadLog = async () => {
+    setLogBusy(true)
+    try {
+      await downloadLogs()
+    } catch (e: unknown) {
+      flash(`✗ ${e instanceof Error ? e.message : String(e)}`, false)
+    } finally {
+      setLogBusy(false)
+    }
+  }
+
+  const handleClearLog = async () => {
+    if (!confirm('Clear the entire log file? This cannot be undone.')) return
+    setLogBusy(true)
+    try {
+      await clearLogs()
+      setLogSize(0)
+      flash('✓ Log file cleared', true)
+    } catch (e: unknown) {
+      flash(`✗ ${e instanceof Error ? e.message : String(e)}`, false)
+    } finally {
+      setLogBusy(false)
     }
   }
 
@@ -147,6 +181,38 @@ export function ConfigPanel() {
         Changes save instantly. Virtual capital takes effect on next day reset (09:15).
         Closing the browser does NOT stop the engine — it runs 24/7 on the server.
       </p>
+
+      {/* ── Error Logs ── */}
+      <div className="rounded border border-border bg-surface p-3 flex flex-col gap-2">
+        <div className="text-muted uppercase tracking-wider text-[10px]">Error Logs</div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-muted text-[10px]">
+            {logSize === null ? 'Checking…' : logSize === 0 ? 'Log is empty' : `File size: ${fmtSize(logSize)}`}
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={handleDownloadLog}
+              disabled={logBusy || logSize === 0}
+              className="px-2 py-1 rounded bg-accent/20 hover:bg-accent/40
+                         border border-accent/30 text-accent disabled:opacity-40"
+            >
+              {logBusy ? '…' : 'Download'}
+            </button>
+            <button
+              onClick={handleClearLog}
+              disabled={logBusy || logSize === 0}
+              className="px-2 py-1 rounded bg-bear/20 hover:bg-bear/40
+                         border border-bear/30 text-bear disabled:opacity-40"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+        <p className="text-muted text-[10px] leading-relaxed">
+          Rotating log — max 5 MB, 3 backups kept. Download to inspect Dhan
+          connection errors, signal activity, and engine events.
+        </p>
+      </div>
     </div>
   )
 }
