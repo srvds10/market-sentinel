@@ -198,6 +198,7 @@ class Engine:
 
     async def _tick_loop(self) -> None:
         while True:
+            self._signal_engine.reset()
             provider = self._make_provider()
             warmup_end = time.monotonic() + self._warmup_seconds
 

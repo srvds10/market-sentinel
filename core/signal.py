@@ -157,6 +157,20 @@ class SignalEngine:
         self._bias_windows: dict[str, RollingWindow] = {}
         self._last_z_score: float | None = None
 
+    def reset(self) -> None:
+        """Clear all rolling windows and Z-score history.
+
+        Called on every WS reconnect so a gap in the feed doesn't corrupt
+        the rolling mean/stdev used to derive Z-scores.
+        """
+        self._zscore = ZScoreTracker(
+            lookback_minutes=self.config.zscore_lookback_minutes,
+            min_samples=self.config.min_history_samples,
+        )
+        self._windows.clear()
+        self._bias_windows.clear()
+        self._last_z_score = None
+
     # ------------------------------------------------------------------
     # Instrument map wiring
     # ------------------------------------------------------------------

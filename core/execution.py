@@ -64,9 +64,11 @@ class PaperTrade:
     qty: int
     capital_at_risk: float  # ₹ allocated (entry_price * qty * lot_size)
     z_score_entry: float
-    stop_loss: float        # absolute price floor
-    trailing_high: float    # running peak (for trailing stop)
-    trailing_active: bool   # True once profit >= activation threshold
+    stop_loss: float                    # absolute price floor
+    trailing_high: float                # running peak (for trailing stop)
+    trailing_active: bool               # True once profit >= activation threshold
+    trailing_stop_pct: float = 0.15     # snapshotted from config at open time
+    trailing_activation_pct: float = 0.20
     closed_at: float | None = None
     exit_price: float | None = None
     exit_reason: ExitReason | None = None
@@ -250,6 +252,8 @@ class ExecutionEngine:
             stop_loss=stop_loss,
             trailing_high=entry_price,
             trailing_active=False,
+            trailing_stop_pct=self.config.trailing_stop_pct,
+            trailing_activation_pct=self.config.trailing_stop_activation_pct,
         )
         self._open_trade = trade
         logger.info(
@@ -279,7 +283,7 @@ class ExecutionEngine:
 
         # --- trailing stop check ---
         if trade.trailing_active:
-            trail_floor = trade.trailing_high * (1.0 - self.config.trailing_stop_pct)
+            trail_floor = trade.trailing_high * (1.0 - trade.trailing_stop_pct)
             if ltp <= trail_floor:
                 return self._close(ltp, ExitReason.TRAILING_STOP)
 
@@ -291,7 +295,7 @@ class ExecutionEngine:
 
     def _trailing_activated(self, trade: PaperTrade, ltp: float) -> bool:
         profit_pct = (ltp - trade.entry_price) / trade.entry_price
-        return profit_pct >= self.config.trailing_stop_activation_pct
+        return profit_pct >= trade.trailing_activation_pct
 
     # ------------------------------------------------------------------
     # Named exit triggers

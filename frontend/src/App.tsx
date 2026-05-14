@@ -68,10 +68,10 @@ export default function App() {
       if (msg.spot_ltp) {
         const t = Date.now()
         setPriceHistory(prev =>
-          [...prev, { t, spot: msg.spot_ltp!, z: msg.last_z_score ?? 0 }].slice(-120)
+          [...prev, { t, spot: msg.spot_ltp!, z: msg.last_z_score ?? 0 }].slice(-900)
         )
         setPnlHistory(prev =>
-          [...prev, { t, pnl: msg.daily_pnl ?? 0 }].slice(-120)
+          [...prev, { t, pnl: msg.daily_pnl ?? 0 }].slice(-900)
         )
       }
     } else if (msg.type === 'signal') {
