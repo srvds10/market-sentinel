@@ -124,8 +124,7 @@ class SignalConfig:
     zscore_threshold: float = 2.0
     zscore_lookback_minutes: float = 20.0
     min_history_samples: int = 30
-    bias_window_seconds: float = 300.0   # 5-min rolling window for market bias
-    bias_threshold: float = 20.0         # ±NIFTY pts in 5 min to declare trend
+    bias_window_seconds: float = 60.0    # 1-min rolling window for option-flow bias
 
 
 class SignalEngine:
@@ -144,7 +143,6 @@ class SignalEngine:
             lookback_minutes=config.zscore_lookback_minutes,
             min_samples=config.min_history_samples,
         )
-        self._bias_window = RollingWindow(config.bias_window_seconds)
 
         # These are updated by InstrumentManager on recalibration
         self._spot_symbol: str = ""
@@ -153,8 +151,10 @@ class SignalEngine:
         self._otm_call_symbol: str = ""
         self._otm_put_symbol: str = ""
 
-        # One rolling window per tracked symbol
+        # One rolling window per tracked symbol (30s for Z-score signal)
         self._windows: dict[str, RollingWindow] = {}
+        # Separate 1-min windows for option-flow bias (OTM vs ATM comparison)
+        self._bias_windows: dict[str, RollingWindow] = {}
         self._last_z_score: float | None = None
 
     # ------------------------------------------------------------------
@@ -184,6 +184,11 @@ class SignalEngine:
             if sym not in self._windows:
                 self._windows[sym] = RollingWindow(self.config.window_seconds)
 
+        # 1-min bias windows for the four option legs (preserve across ATM rolls)
+        for sym in {atm_call_symbol, atm_put_symbol, otm_call_symbol, otm_put_symbol}:
+            if sym and sym not in self._bias_windows:
+                self._bias_windows[sym] = RollingWindow(self.config.bias_window_seconds)
+
     def register_symbols(self, symbols: set[str]) -> None:
         """Pre-create rolling windows for grid strikes that aren't yet active.
 
@@ -206,9 +211,10 @@ class SignalEngine:
             return None
         win.push(tick.ltp, tick.timestamp)
 
-        # Track spot in the 5-min bias window
-        if tick.symbol == self._spot_symbol:
-            self._bias_window.push(tick.ltp, tick.timestamp)
+        # Feed option-flow bias windows for ATM/OTM legs
+        bias_win = self._bias_windows.get(tick.symbol)
+        if bias_win is not None:
+            bias_win.push(tick.ltp, tick.timestamp)
 
         # Need at least spot + one OTM window populated
         if tick.symbol not in (self._otm_call_symbol, self._otm_put_symbol):
@@ -291,19 +297,47 @@ class SignalEngine:
     # ------------------------------------------------------------------
 
     def market_bias(self) -> tuple[str, float | None]:
-        """Return (label, spot_delta_5min).
+        """Option-flow market bias over the last 1 minute.
 
-        label is one of: 'BULLISH' | 'BEARISH' | 'SIDEWAYS' | 'UNKNOWN'
-        UNKNOWN means the 5-min window doesn't have enough data yet.
+        Compares OTM vs ATM premium momentum:
+          BULLISH  — OTM call premium rising faster than ATM call
+          BEARISH  — OTM put premium rising faster than ATM put
+          SIDEWAYS — both OTM call and OTM put premiums declining
+          UNKNOWN  — mixed signals or insufficient data
+
+        Returns (label, trigger_delta) where trigger_delta is the 1-min
+        change in the OTM leg that determined the label (None for SIDEWAYS
+        / UNKNOWN).
         """
-        delta = self._bias_window.delta()
-        if delta is None:
+        bw_atm_c = self._bias_windows.get(self._atm_call_symbol)
+        bw_atm_p = self._bias_windows.get(self._atm_put_symbol)
+        bw_otm_c = self._bias_windows.get(self._otm_call_symbol)
+        bw_otm_p = self._bias_windows.get(self._otm_put_symbol)
+
+        if not all([bw_atm_c, bw_atm_p, bw_otm_c, bw_otm_p]):
             return "UNKNOWN", None
-        if delta >= self.config.bias_threshold:
-            return "BULLISH", round(delta, 2)
-        if delta <= -self.config.bias_threshold:
-            return "BEARISH", round(delta, 2)
-        return "SIDEWAYS", round(delta, 2)
+
+        d_atm_c = bw_atm_c.delta()  # type: ignore[union-attr]
+        d_atm_p = bw_atm_p.delta()  # type: ignore[union-attr]
+        d_otm_c = bw_otm_c.delta()  # type: ignore[union-attr]
+        d_otm_p = bw_otm_p.delta()  # type: ignore[union-attr]
+
+        if any(d is None for d in [d_atm_c, d_atm_p, d_otm_c, d_otm_p]):
+            return "UNKNOWN", None
+
+        # BULLISH: OTM call rising faster than ATM call
+        if d_otm_c > 0 and d_otm_c > d_atm_c:  # type: ignore[operator]
+            return "BULLISH", round(d_otm_c, 2)
+
+        # BEARISH: OTM put rising faster than ATM put
+        if d_otm_p > 0 and d_otm_p > d_atm_p:  # type: ignore[operator]
+            return "BEARISH", round(d_otm_p, 2)
+
+        # SIDEWAYS: both OTM options declining
+        if d_otm_c <= 0 and d_otm_p <= 0:  # type: ignore[operator]
+            return "SIDEWAYS", None
+
+        return "UNKNOWN", None
 
     def z_score_sample_count(self) -> int:
         return self._zscore.sample_count()

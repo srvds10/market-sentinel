@@ -17,8 +17,7 @@ signal:
   target_delta_min: 0.10      # OTM strike delta lower bound
   target_delta_max: 0.15      # OTM strike delta upper bound
   recalibration_interval_minutes: 1    # how often to re-anchor ATM/OTM strikes
-  bias_window_seconds: 300             # rolling window for market bias (5 min)
-  bias_threshold: 20.0                 # ±NIFTY pts in window to call Bullish/Bearish
+  bias_window_seconds: 60              # 1-min window for OTM vs ATM option-flow bias
 
 execution:
   paper_trading: true

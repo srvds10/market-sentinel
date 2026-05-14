@@ -127,8 +127,7 @@ class Engine:
             zscore_threshold=sig_cfg["zscore_threshold"],
             zscore_lookback_minutes=sig_cfg["zscore_lookback_minutes"],
             min_history_samples=sig_cfg["min_history_samples"],
-            bias_window_seconds=sig_cfg.get("bias_window_seconds", 300.0),
-            bias_threshold=sig_cfg.get("bias_threshold", 20.0),
+            bias_window_seconds=sig_cfg.get("bias_window_seconds", 60.0),
         ))
 
         exc_cfg = self._cfg["execution"]

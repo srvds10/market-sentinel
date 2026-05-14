@@ -202,7 +202,7 @@ export default function App() {
           {/* Market bias */}
           <MarketBias
             bias={status.market_bias ?? 'UNKNOWN'}
-            delta5m={status.spot_delta_5m ?? null}
+            triggerDelta={status.spot_delta_5m ?? null}
           />
 
           {/* Signal feed */}
