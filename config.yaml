@@ -1,5 +1,5 @@
 dhan:
-  client_id: "${DHAN_CLIENT_ID}"
+  client_id: "1102982629"
   access_token: "${DHAN_ACCESS_TOKEN}"
   ws_url: "wss://api-feed.dhan.co"
 

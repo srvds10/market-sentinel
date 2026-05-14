@@ -163,8 +163,11 @@ class DhanWSClient(TickProvider):
             "InstrumentList": inst_list,
         })
 
-        logger.info("Dhan WS connecting — %d instruments: %s",
-                    len(instruments), [i.symbol for i in instruments])
+        logger.info(
+            "Dhan WS connecting — %d instruments: %s  (client_id=%r  token_len=%d)",
+            len(instruments), [i.symbol for i in instruments],
+            self._client_id or "(empty)", len(self._access_token),
+        )
 
         async with websockets.connect(url, open_timeout=15) as ws:
             logger.info("Dhan WS connected")
