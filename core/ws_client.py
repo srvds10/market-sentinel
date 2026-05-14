@@ -83,16 +83,26 @@ class DhanWSClient(TickProvider):
 
     async def run(self) -> None:
         self._running = True
+        delay = self._reconnect_delay
         while self._running:
             try:
                 await self._connect_and_stream()
+                delay = self._reconnect_delay  # reset backoff after a live session
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                level = logger.error if "disconnect packet" in str(exc) or "code=" in str(exc) else logger.warning
-                level("Dhan WS error: %s — reconnecting in %ss", exc, self._reconnect_delay)
+                exc_str = str(exc)
+                is_429  = "429" in exc_str
+                is_disc = "disconnect packet" in exc_str or "code=" in exc_str
+                level   = logger.error if is_disc else logger.warning
+                level("Dhan WS error: %s — reconnecting in %.0fs", exc, delay)
+                if self._running:
+                    await asyncio.sleep(delay)
+                # Faster back-off on rate-limit (429), normal doubling otherwise
+                delay = min(delay * (3 if is_429 else 2), 120.0)
+                continue
             if self._running:
-                await asyncio.sleep(self._reconnect_delay)
+                await asyncio.sleep(delay)
 
     async def _connect_and_stream(self) -> None:
         try:

@@ -110,11 +110,13 @@ class InstrumentManager:
         while True:
             try:
                 await self._calibrate()
+                await asyncio.sleep(self._interval)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error("Recalibration failed: %s", exc, exc_info=True)
-            await asyncio.sleep(self._interval)
+                # Retry quickly after failure (60s) rather than waiting the full interval
+                await asyncio.sleep(60)
 
     async def _calibrate(self) -> None:
         imap = await self._fetch_map()
@@ -159,6 +161,9 @@ class InstrumentManager:
     # ------------------------------------------------------------------
 
     async def _fetch_map(self) -> InstrumentMap:
+        if not self._dhan_access_token:
+            raise ValueError("Dhan access token not set — update it via the UI Config panel")
+
         url = "https://api.dhan.co/v2/optionchain"
         headers = {
             "client-id":    self._dhan_client_id,
@@ -166,12 +171,13 @@ class InstrumentManager:
             "Content-Type": "application/json",
         }
         is_index = self._instrument_name in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+        body: dict = {
+            "UnderlyingScrip": self._instrument_name,
+            "UnderlyingType":  "INDEX" if is_index else "EQUITY",
+            # ExpiryDate omitted → Dhan returns the nearest expiry
+        }
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, headers=headers, json={
-                "UnderlyingScrip": self._instrument_name,
-                "UnderlyingType":  "INDEX" if is_index else "EQUITY",
-                "ExpiryDate":      "",   # nearest expiry
-            })
+            resp = await client.post(url, headers=headers, json=body)
             resp.raise_for_status()
             data = resp.json()
         return self._parse(data)
