@@ -267,36 +267,45 @@ class InstrumentManager:
         """Parse Dhan scrip master CSV and return call/put OptionStrike lists
         for the nearest expiry of self._instrument_name.
 
-        CSV columns (relevant ones):
-          SEM_EXM_EXCH_ID, SEM_SEGMENT, SEM_SMST_SECURITY_ID,
-          SEM_INSTRUMENT_NAME, SEM_EXPIRY_DATE (YYYY-MM-DD),
-          SEM_STRIKE_PRICE, SEM_OPTION_TYPE (CE/PE),
-          SEM_TRADING_SYMBOL, SEM_CUSTOM_SYMBOL
+        Primary filter: SEM_INSTRUMENT_NAME == "OPTIDX" (index options)
+        Underlying:     SM_SYMBOL_NAME == instrument_name  OR
+                        SEM_TRADING_SYMBOL starts with instrument_name
+        CE/PE:          SEM_OPTION_TYPE if present; otherwise SEM_TRADING_SYMBOL suffix
+
+        Dhan's scrip master uses single-char SEM_SEGMENT codes (E/M/C/…) and
+        does not reliably carry "CE"/"PE" in SEM_OPTION_TYPE across all CSV
+        versions, so we derive option type from the trading symbol suffix.
         """
         reader = csv.DictReader(io.StringIO(csv_text))
         today  = date.today()
 
-        # Collect all upcoming expiries for this underlying.
-        # We rely on symbol prefix + option type rather than rigid segment/instrument
-        # name checks, since Dhan occasionally changes the scrip master schema.
         rows_by_expiry: dict[date, list[dict]] = {}
-        seen_segs: set[str] = set()
-        seen_insts: set[str] = set()
         total_rows = 0
+        name_upper = self._instrument_name.upper()
 
         for row in reader:
             total_rows += 1
-            seg  = row.get("SEM_SEGMENT", "").strip()
-            inst = row.get("SEM_INSTRUMENT_NAME", "").strip()
-            sym  = (row.get("SEM_TRADING_SYMBOL", "") or row.get("SEM_CUSTOM_SYMBOL", "")).strip()
-            opt  = row.get("SEM_OPTION_TYPE", "").strip()
+            inst     = row.get("SEM_INSTRUMENT_NAME", "").strip()
+            sym      = (row.get("SEM_TRADING_SYMBOL", "") or row.get("SEM_CUSTOM_SYMBOL", "")).strip()
+            sm_sym   = row.get("SM_SYMBOL_NAME", "").strip().upper()
+            opt_raw  = row.get("SEM_OPTION_TYPE", "").strip().upper()
 
-            seen_segs.add(seg)
-            seen_insts.add(inst)
-
-            if opt not in ("CE", "PE"):
+            # Must be an index option contract
+            if inst not in ("OPTIDX", "OPTSTK"):
                 continue
-            if not sym.upper().startswith(self._instrument_name.upper()):
+
+            # Underlying check: prefer SM_SYMBOL_NAME, fall back to trading symbol prefix
+            underlying = sm_sym if sm_sym else sym.upper()
+            if not underlying.startswith(name_upper):
+                continue
+
+            # Determine CE/PE: use SEM_OPTION_TYPE if recognisable, else symbol suffix
+            sym_upper = sym.upper()
+            if opt_raw in ("CE", "C") or sym_upper.endswith("CE"):
+                is_call: bool | None = True
+            elif opt_raw in ("PE", "P") or sym_upper.endswith("PE"):
+                is_call = False
+            else:
                 continue
 
             exp_str = row.get("SEM_EXPIRY_DATE", "").strip()
@@ -310,15 +319,13 @@ class InstrumentManager:
 
             if exp_date < today:
                 continue
+            row["_is_call"] = is_call   # stash so second pass doesn't re-derive
             rows_by_expiry.setdefault(exp_date, []).append(row)
 
         if not rows_by_expiry:
             logger.error(
-                "Scrip master: no %s options found. rows=%d "
-                "unique_segments=%s unique_instruments=%s  first_line=%s",
-                self._instrument_name, total_rows,
-                sorted(seen_segs)[:10], sorted(seen_insts)[:10],
-                csv_text[:300],
+                "Scrip master: no %s options found after filtering. rows=%d  first_200=%s",
+                self._instrument_name, total_rows, csv_text[:200],
             )
             raise ValueError(
                 f"No upcoming {self._instrument_name} options found in scrip master "
@@ -336,9 +343,9 @@ class InstrumentManager:
             try:
                 strike      = float(row.get("SEM_STRIKE_PRICE", 0))
                 security_id = str(row.get("SEM_SMST_SECURITY_ID", "")).strip()
-                opt_type    = row.get("SEM_OPTION_TYPE", "")
-                symbol      = f"{self._instrument_name}-{int(strike)}-{opt_type}"
-                is_call     = opt_type == "CE"
+                is_call     = row["_is_call"]
+                opt_label   = "CE" if is_call else "PE"
+                symbol      = f"{self._instrument_name}-{int(strike)}-{opt_label}"
                 obj = OptionStrike(
                     symbol=symbol, security_id=security_id,
                     strike_price=strike, is_call=is_call,
