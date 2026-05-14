@@ -178,7 +178,12 @@ class InstrumentManager:
         }
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(url, headers=headers, json=body)
-            resp.raise_for_status()
+            if not resp.is_success:
+                logger.error(
+                    "Option chain API returned %d — Dhan response: %s",
+                    resp.status_code, resp.text[:500],
+                )
+                resp.raise_for_status()
             data = resp.json()
         return self._parse(data)
 

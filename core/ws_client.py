@@ -12,9 +12,12 @@ asyncio.run() and crashes when uvicorn's loop is already running):
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import struct
 import time
 from abc import ABC, abstractmethod
+from contextlib import redirect_stdout
 from dataclasses import dataclass
 from typing import Callable
 
@@ -141,6 +144,32 @@ class DhanWSClient(TickProvider):
 
         context = DhanContext(self._client_id, self._access_token)
         feed = MarketFeed(context, dhan_instruments, "v2")
+
+        # Intercept dhanhq's server_disconnection() which only does print() internally.
+        # We capture stdout and re-emit through the logger so the reason is visible.
+        _orig_disc = feed.server_disconnection
+
+        def _patched_disc(data: bytes) -> None:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                try:
+                    _orig_disc(data)
+                except Exception:
+                    pass
+            msg = buf.getvalue().strip()
+            if msg:
+                logger.error("Dhan server disconnect: %s", msg)
+            else:
+                # Parse raw bytes ourselves as fallback
+                try:
+                    code = struct.unpack("<H", data[8:10])[0]
+                    logger.error("Dhan server disconnect code=%d "
+                                 "(805=too many conns, 806=no subscription, "
+                                 "807=token expired, 808=bad client ID, 809=auth failed)", code)
+                except Exception:
+                    logger.error("Dhan server sent disconnect packet (payload: %s)", data[:16].hex())
+
+        feed.server_disconnection = _patched_disc  # type: ignore[method-assign]
 
         # run_forever() calls asyncio.run() internally which crashes when
         # another loop is already running (uvicorn). Use the async API directly.
