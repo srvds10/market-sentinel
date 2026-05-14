@@ -181,12 +181,19 @@ class DhanWSClient(TickProvider):
                 try:
                     data = await feed.get_instrument_data()
                 except Exception as recv_exc:
-                    # Capture WebSocket close code/reason when available
-                    code = getattr(recv_exc, "code", None)
+                    code   = getattr(recv_exc, "code", None)
                     reason = getattr(recv_exc, "reason", None)
-                    if code or reason:
+                    if code is not None or reason is not None:
+                        hint = ""
+                        if code == 1006:
+                            hint = (
+                                " — Server closed without explanation. "
+                                "Check Dhan portal: (1) enable Market Feed / Live Data "
+                                "subscription under your app, (2) whitelist this server's "
+                                "IP under My Apps → Allowed IPs."
+                            )
                         raise ConnectionError(
-                            f"Dhan WS closed — code={code} reason={reason!r}"
+                            f"Dhan WS closed — code={code} reason={reason!r}{hint}"
                         ) from recv_exc
                     raise
 

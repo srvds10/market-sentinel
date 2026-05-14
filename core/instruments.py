@@ -164,27 +164,55 @@ class InstrumentManager:
         if not self._dhan_access_token:
             raise ValueError("Dhan access token not set — update it via the UI Config panel")
 
-        url = "https://api.dhan.co/v2/optionchain"
         headers = {
             "client-id":    self._dhan_client_id,
             "access-token": self._dhan_access_token,
             "Content-Type": "application/json",
         }
         is_index = self._instrument_name in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
-        body: dict = {
-            "UnderlyingScrip": self._instrument_name,
-            "UnderlyingType":  "INDEX" if is_index else "EQUITY",
-            # ExpiryDate omitted → Dhan returns the nearest expiry
-        }
+        underlying_type = "INDEX" if is_index else "EQUITY"
+
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, headers=headers, json=body)
-            if not resp.is_success:
-                logger.error(
-                    "Option chain API returned %d — Dhan response: %s",
-                    resp.status_code, resp.text[:500],
-                )
-                resp.raise_for_status()
-            data = resp.json()
+            # Step 1: get expiry list (ExpiryDate is required by Dhan — cannot be omitted)
+            expiry_resp = await client.post(
+                "https://api.dhan.co/v2/optionchain/expirylist",
+                headers=headers,
+                json={"UnderlyingScrip": self._instrument_name, "UnderlyingType": underlying_type},
+            )
+            if not expiry_resp.is_success:
+                logger.error("Expiry list API returned %d — %s",
+                             expiry_resp.status_code, expiry_resp.text[:300])
+                expiry_resp.raise_for_status()
+
+            expiry_data = expiry_resp.json()
+            expiry_list: list[str] = (
+                expiry_data.get("data", {}).get("ExpiryDate")
+                or expiry_data.get("expiryList")
+                or expiry_data.get("data", [])
+            )
+            if not expiry_list:
+                raise ValueError(f"Dhan returned empty expiry list: {expiry_resp.text[:200]}")
+
+            nearest_expiry = expiry_list[0]
+            logger.info("Using expiry %s (from %d available)", nearest_expiry, len(expiry_list))
+
+            # Step 2: fetch option chain for the nearest expiry
+            chain_resp = await client.post(
+                "https://api.dhan.co/v2/optionchain",
+                headers=headers,
+                json={
+                    "UnderlyingScrip": self._instrument_name,
+                    "UnderlyingType":  underlying_type,
+                    "ExpiryDate":      nearest_expiry,
+                },
+            )
+            if not chain_resp.is_success:
+                logger.error("Option chain API returned %d — %s",
+                             chain_resp.status_code, chain_resp.text[:500])
+                chain_resp.raise_for_status()
+
+            data = chain_resp.json()
+
         return self._parse(data)
 
     def _parse(self, data: dict) -> InstrumentMap:
