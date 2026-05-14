@@ -116,6 +116,11 @@ async def update_token(body: TokenUpdate, request: Request) -> dict:
     # Update running config in memory
     request.app.state.config.setdefault("dhan", {})["access_token"] = token
 
+    # Hot-update InstrumentManager so it uses the new token immediately
+    im = getattr(request.app.state, "instrument_manager", None)
+    if im is not None:
+        im.update_token(token)
+
     # Signal engine to reconnect WS with new token
     engine_state = request.app.state.engine_state
     if hasattr(engine_state, "reconnect_event"):

@@ -105,18 +105,35 @@ class InstrumentManager:
         self._dhan_access_token = dhan_access_token
         self._instrument_name = instrument_name
         self._current_map: Optional[InstrumentMap] = None
+        self._recalibrate_now = asyncio.Event()
+
+    def update_token(self, token: str) -> None:
+        """Hot-update the access token and trigger immediate recalibration."""
+        self._dhan_access_token = token
+        self._recalibrate_now.set()
 
     async def run(self) -> None:
         while True:
             try:
                 await self._calibrate()
-                await asyncio.sleep(self._interval)
+                # Wait for the interval or an immediate recalibrate request
+                try:
+                    await asyncio.wait_for(self._recalibrate_now.wait(), timeout=self._interval)
+                    self._recalibrate_now.clear()
+                    logger.info("Token updated — recalibrating instruments immediately")
+                except asyncio.TimeoutError:
+                    pass
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error("Recalibration failed: %s", exc, exc_info=True)
-                # Retry quickly after failure (60s) rather than waiting the full interval
-                await asyncio.sleep(60)
+                # On failure, wait up to 60s or until a new token arrives
+                try:
+                    await asyncio.wait_for(self._recalibrate_now.wait(), timeout=60)
+                    self._recalibrate_now.clear()
+                    logger.info("Token updated — retrying recalibration")
+                except asyncio.TimeoutError:
+                    pass
 
     async def _calibrate(self) -> None:
         imap = await self._fetch_map()
