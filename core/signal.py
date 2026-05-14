@@ -181,6 +181,18 @@ class SignalEngine:
             if sym not in self._windows:
                 self._windows[sym] = RollingWindow(self.config.window_seconds)
 
+    def register_symbols(self, symbols: set[str]) -> None:
+        """Pre-create rolling windows for grid strikes that aren't yet active.
+
+        Called by the engine after each grid build so every subscribed strike
+        accumulates history; when the active ATM/OTM rolls onto one of these
+        strikes, it already has a populated window and can fire signals
+        immediately without re-warming.
+        """
+        for sym in symbols:
+            if sym and sym not in self._windows:
+                self._windows[sym] = RollingWindow(self.config.window_seconds)
+
     # ------------------------------------------------------------------
     # Tick ingestion
     # ------------------------------------------------------------------

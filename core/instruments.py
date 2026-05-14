@@ -16,7 +16,7 @@ import math
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
@@ -42,10 +42,25 @@ class OptionStrike:
 
 @dataclass
 class InstrumentMap:
+    """Wide strike grid + currently-active ATM/OTM selection.
+
+    The grid (all_calls, all_puts) is built at calibration time and stays
+    stable while spot stays inside the grid range.  The active fields
+    (atm_call, atm_put, otm_call, otm_put) are re-picked from the grid
+    on every spot tick by `select_active_for_spot` — no WS reconnect
+    needed when ATM shifts within the grid.
+    """
     timestamp: float
     spot_symbol: str
     spot_security_id: str   # "13" for Nifty 50 on NSE_IDX
     spot_ltp: float
+    expiry_days: int
+
+    # Wide strike grid (subscribed to once at WS connect time)
+    all_calls: list[OptionStrike]   # sorted ascending by strike
+    all_puts:  list[OptionStrike]   # sorted ascending by strike
+
+    # Currently-selected leg (mutated as spot drifts)
     atm_strike: float
     atm_call: OptionStrike
     atm_put: OptionStrike
@@ -103,7 +118,7 @@ class InstrumentManager:
         dhan_client_id: str = "",
         dhan_access_token: str = "",
         instrument_name: str = "NIFTY",
-        on_instruments_changed: Optional[callable] = None,
+        on_instruments_changed: Optional[Callable[[], None]] = None,
     ) -> None:
         self._signal_engine   = signal_engine
         self._interval        = recalibration_interval_minutes * 60.0
@@ -157,33 +172,63 @@ class InstrumentManager:
             otm_call_symbol = imap.otm_call.symbol,
             otm_put_symbol  = imap.otm_put.symbol,
         )
+        # Pre-register every grid symbol so windows accumulate history
+        # before the active leg ever rolls onto them.
+        self._signal_engine.register_symbols(self.all_grid_symbols())
         logger.info(
-            "Calibrated — ATM %.0f | OTM call %.0f (Δ=%.3f) | OTM put %.0f (Δ=%.3f)%s",
+            "Calibrated — grid=%d strikes  ATM=%.0f  active OTM call %.0f (Δ=%.3f)  "
+            "OTM put %.0f (Δ=%.3f)%s",
+            len(imap.all_calls) + len(imap.all_puts),
             imap.atm_strike,
             imap.otm_call.strike_price, imap.otm_call.delta,
             imap.otm_put.strike_price,  imap.otm_put.delta,
-            "  [instruments unchanged]" if not changed else "  [NEW strikes — reconnecting WS]",
+            "  [grid unchanged]" if not changed else "  [GRID SHIFTED — reconnecting WS]",
         )
         if changed and self._on_instruments_changed:
             self._on_instruments_changed()
 
     def _instruments_changed(self, new_map: InstrumentMap) -> bool:
+        """True when the *grid* (set of subscribed strikes) changed — i.e. the
+        WS needs to resubscribe.  Active ATM/OTM shifts inside the same grid
+        do NOT trigger a reconnect; they are handled by update_active_for_spot.
+        """
         old = self._current_map
         if old is None:
             return True
+        old_call_ids = {c.security_id for c in old.all_calls}
+        new_call_ids = {c.security_id for c in new_map.all_calls}
+        old_put_ids  = {p.security_id for p in old.all_puts}
+        new_put_ids  = {p.security_id for p in new_map.all_puts}
         return (
-            new_map.atm_call.security_id != old.atm_call.security_id
-            or new_map.atm_put.security_id  != old.atm_put.security_id
-            or new_map.otm_call.security_id != old.otm_call.security_id
-            or new_map.otm_put.security_id  != old.otm_put.security_id
+            old.spot_security_id != new_map.spot_security_id
+            or old_call_ids != new_call_ids
+            or old_put_ids  != new_put_ids
         )
 
     def current_map(self) -> Optional[InstrumentMap]:
         return self._current_map
 
+    def update_active_for_spot(self, spot: float) -> bool:
+        """Re-pick ATM/OTM legs from the grid based on the latest spot tick.
+        Returns True if the active selection changed (so the SignalEngine
+        instrument map should be refreshed)."""
+        if self._current_map is None or spot <= 0:
+            return False
+        return self._select_active_for_spot(self._current_map, spot)
+
+    def all_grid_symbols(self) -> set[str]:
+        """All strike symbols currently subscribed (for window pre-registration)."""
+        if self._current_map is None:
+            return set()
+        return ({self._current_map.spot_symbol}
+                | {s.symbol for s in self._current_map.all_calls}
+                | {s.symbol for s in self._current_map.all_puts})
+
     def get_dhan_instruments(self) -> list:
         """Return DhanInstrument list for the WS client subscription.
-        Returns just Nifty spot until the first calibration completes.
+
+        Returns just Nifty spot until the first calibration completes;
+        afterwards returns spot + every strike in the grid (~27 instruments).
         """
         from core.ws_client import DhanInstrument
 
@@ -191,13 +236,12 @@ class InstrumentManager:
         if imap is None:
             return [DhanInstrument("13", "NSE_IDX", "NIFTY-SPOT")]
 
-        return [i for i in [
-            DhanInstrument(imap.spot_security_id,        "NSE_IDX", imap.spot_symbol),
-            DhanInstrument(imap.atm_call.security_id,    "NSE_FNO", imap.atm_call.symbol),
-            DhanInstrument(imap.atm_put.security_id,     "NSE_FNO", imap.atm_put.symbol),
-            DhanInstrument(imap.otm_call.security_id,    "NSE_FNO", imap.otm_call.symbol),
-            DhanInstrument(imap.otm_put.security_id,     "NSE_FNO", imap.otm_put.symbol),
-        ] if i.security_id]
+        instruments: list = [
+            DhanInstrument(imap.spot_security_id, "NSE_IDX", imap.spot_symbol),
+        ]
+        for s in imap.all_calls + imap.all_puts:
+            instruments.append(DhanInstrument(s.security_id, "NSE_FNO", s.symbol))
+        return [i for i in instruments if i.security_id]
 
     # ------------------------------------------------------------------
     # Instrument lookup via Dhan public scrip master (no auth required)
@@ -255,43 +299,107 @@ class InstrumentManager:
             # Try to get spot from intraday chart (authenticated)
             spot = await self._fetch_spot_ltp()
 
-        atm_strike = self._round_to_100(spot) if "BANK" in self._instrument_name \
-                     else self._round_to_50(spot)
+        is_bank = "BANK" in self._instrument_name
+        step    = 100 if is_bank else 50
+        atm_strike = self._round_to_100(spot) if is_bank else self._round_to_50(spot)
 
-        # Calculate BS delta for each strike
+        # Calculate BS delta for each strike (re-computed in select_active_for_spot
+        # as spot moves, but we initialise here so the grid has reasonable values)
         T     = max(calls[0].expiry_days, 1) / 252.0
         sigma = 0.14
         for s in calls + puts:
             s.delta = round(bs_delta(spot, s.strike_price, T, sigma, s.is_call), 4)
 
-        atm_call  = min(calls, key=lambda s: abs(s.strike_price - atm_strike))
-        atm_put   = min(puts,  key=lambda s: abs(s.strike_price - atm_strike))
-        otm_calls = [c for c in calls if c.strike_price > atm_strike]
-        otm_puts  = [p for p in puts  if p.strike_price < atm_strike]
-        otm_call  = find_closest_delta_strike(otm_calls or calls, self._target_delta)
-        otm_put   = find_closest_delta_strike(otm_puts  or puts,  self._target_delta)
+        # Build the grid: 13 calls (2 ITM + ATM + 10 OTM) and 13 puts.
+        #   call ITM  → strike < spot
+        #   call OTM  → strike > spot
+        #   put  ITM  → strike > spot
+        #   put  OTM  → strike < spot
+        call_strikes_wanted = {atm_strike + step * i for i in range(-2, 11)}
+        put_strikes_wanted  = {atm_strike + step * i for i in range(-10, 3)}
+
+        all_calls = sorted(
+            [c for c in calls if c.strike_price in call_strikes_wanted],
+            key=lambda s: s.strike_price,
+        )
+        all_puts = sorted(
+            [p for p in puts if p.strike_price in put_strikes_wanted],
+            key=lambda s: s.strike_price,
+        )
+
+        if not all_calls or not all_puts:
+            raise ValueError(
+                f"Strike grid is empty for {self._instrument_name} around ATM={atm_strike}. "
+                f"Available call strikes: {sorted({c.strike_price for c in calls})[:10]}…"
+            )
 
         spot_security_id = self._SPOT_SECURITY_IDS.get(self._instrument_name, "13")
 
-        logger.info(
-            "Scrip master calibrated — spot=%.0f ATM=%.0f T=%dd | "
-            "OTM call %s (Δ=%.3f) | OTM put %s (Δ=%.3f)",
-            spot, atm_strike, atm_call.expiry_days,
-            otm_call.symbol, otm_call.delta,
-            otm_put.symbol,  otm_put.delta,
-        )
-
-        return InstrumentMap(
+        # Build the map with placeholder active legs; select_active_for_spot
+        # below picks the real ones based on live spot.
+        imap = InstrumentMap(
             timestamp        = time.time(),
             spot_symbol      = f"{self._instrument_name}-SPOT",
             spot_security_id = spot_security_id,
             spot_ltp         = spot,
+            expiry_days      = max(calls[0].expiry_days, 1),
+            all_calls        = all_calls,
+            all_puts         = all_puts,
             atm_strike       = atm_strike,
-            atm_call         = atm_call,
-            atm_put          = atm_put,
-            otm_call         = otm_call,
-            otm_put          = otm_put,
+            atm_call         = all_calls[0],
+            atm_put          = all_puts[0],
+            otm_call         = all_calls[-1],
+            otm_put          = all_puts[0],
         )
+        self._select_active_for_spot(imap, spot)
+
+        logger.info(
+            "Scrip master grid built — spot=%.0f ATM=%.0f T=%dd | "
+            "calls %s..%s (%d) | puts %s..%s (%d) | "
+            "active OTM call %s (Δ=%.3f) | active OTM put %s (Δ=%.3f)",
+            spot, atm_strike, imap.expiry_days,
+            int(all_calls[0].strike_price), int(all_calls[-1].strike_price), len(all_calls),
+            int(all_puts[0].strike_price),  int(all_puts[-1].strike_price),  len(all_puts),
+            imap.otm_call.symbol, imap.otm_call.delta,
+            imap.otm_put.symbol,  imap.otm_put.delta,
+        )
+        return imap
+
+    def _select_active_for_spot(self, imap: InstrumentMap, spot: float) -> bool:
+        """Re-pick active ATM/OTM strikes from the grid based on live spot.
+
+        Recomputes BS delta against the current spot so OTM selection
+        tracks the moving market.  Returns True if any active leg changed.
+        """
+        is_bank = "BANK" in self._instrument_name
+        atm_strike = self._round_to_100(spot) if is_bank else self._round_to_50(spot)
+
+        T     = max(imap.expiry_days, 1) / 252.0
+        sigma = 0.14
+        for s in imap.all_calls + imap.all_puts:
+            s.delta = round(bs_delta(spot, s.strike_price, T, sigma, s.is_call), 4)
+
+        new_atm_call = min(imap.all_calls, key=lambda s: abs(s.strike_price - atm_strike))
+        new_atm_put  = min(imap.all_puts,  key=lambda s: abs(s.strike_price - atm_strike))
+        otm_calls = [c for c in imap.all_calls if c.strike_price > atm_strike]
+        otm_puts  = [p for p in imap.all_puts  if p.strike_price < atm_strike]
+        new_otm_call = find_closest_delta_strike(otm_calls or imap.all_calls, self._target_delta)
+        new_otm_put  = find_closest_delta_strike(otm_puts  or imap.all_puts,  self._target_delta)
+
+        changed = (
+            new_atm_call.security_id != imap.atm_call.security_id
+            or new_atm_put.security_id  != imap.atm_put.security_id
+            or new_otm_call.security_id != imap.otm_call.security_id
+            or new_otm_put.security_id  != imap.otm_put.security_id
+        )
+
+        imap.atm_strike = atm_strike
+        imap.spot_ltp   = spot
+        imap.atm_call   = new_atm_call
+        imap.atm_put    = new_atm_put
+        imap.otm_call   = new_otm_call
+        imap.otm_put    = new_otm_put
+        return changed
 
     def _parse_scrip_master(self, csv_text: str) -> tuple[list[OptionStrike], list[OptionStrike]]:
         """Parse Dhan scrip master CSV and return call/put OptionStrike lists

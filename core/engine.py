@@ -376,6 +376,20 @@ class Engine:
             return
         if tick.symbol == imap.spot_symbol:
             self.state.spot_ltp = tick.ltp
+            # Live re-selection: if ATM/OTM has shifted within the grid, swap
+            # the SignalEngine's active leg pointers — no WS reconnect needed.
+            if self._instrument_manager.update_active_for_spot(tick.ltp):
+                self._signal_engine.set_instrument_map(
+                    spot_symbol     = imap.spot_symbol,
+                    atm_call_symbol = imap.atm_call.symbol,
+                    atm_put_symbol  = imap.atm_put.symbol,
+                    otm_call_symbol = imap.otm_call.symbol,
+                    otm_put_symbol  = imap.otm_put.symbol,
+                )
+                logger.debug(
+                    "Active legs rolled — ATM=%.0f  OTM call=%s  OTM put=%s",
+                    imap.atm_strike, imap.otm_call.symbol, imap.otm_put.symbol,
+                )
         elif tick.symbol == imap.atm_call.symbol:
             self.state.atm_ltp = tick.ltp
         elif tick.symbol == imap.otm_call.symbol:
