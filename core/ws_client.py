@@ -1,23 +1,27 @@
 """
 Tick provider: Dhan HQ live market data WebSocket.
 
-Uses dhanhq async API directly (bypasses run_forever which calls
-asyncio.run() and crashes when uvicorn's loop is already running):
+Connects directly via the websockets library, parsing Dhan's binary ticker
+protocol. This avoids dhanhq.MarketFeed.__init__ calling asyncio.set_event_loop()
+which replaces uvicorn's running loop and causes code=1006 disconnects.
 
-  await feed.connect()
-  data = await feed.get_instrument_data()   # yields to event loop while waiting
-  await feed.disconnect()
+Binary ticker packet layout (16 bytes):
+  offset 0   uint8   packet_type  (2 = Ticker, 6 = extended ticker)
+  offset 1   uint8   exchange_segment
+  offset 2   uint16  reserved
+  offset 4   uint32  security_id  (little-endian)
+  offset 8   float32 ltp          (little-endian)
+  offset 12  uint32  timestamp    (Unix seconds, little-endian)
 """
 
 from __future__ import annotations
 
 import asyncio
-import io
+import json
 import logging
 import struct
 import time
 from abc import ABC, abstractmethod
-from contextlib import redirect_stdout
 from dataclasses import dataclass
 from typing import Callable
 
@@ -48,27 +52,32 @@ class TickProvider(ABC):
         await self._queue.put(tick)
 
 
+# Exchange segment string → subscription string used in JSON payload
+_SEGMENT_SUB: dict[str, str] = {
+    "NSE_IDX":  "IDX_I",
+    "NSE_EQ":   "NSE_EQ",
+    "NSE_FNO":  "NSE_FNO",
+    "NSE_CURR": "NSE_CURR",
+    "BSE_EQ":   "BSE_EQ",
+    "BSE_FNO":  "BSE_FNO",
+}
+
+# Packet type bytes that carry an LTP field at offset 8
+_LTP_PACKET_TYPES = frozenset({2, 6})
+
+
 class DhanWSClient(TickProvider):
     """Live Nifty feed via Dhan HQ WebSocket.
 
-    Uses the documented dhanhq v2.1.0+ API:
-        feed = MarketFeed(dhan_context, instruments, version)
-        feed.run_forever()
-        while True:
-            data = feed.get_data()
-
-    Reconnects automatically on disconnection.
+    Uses the websockets library directly instead of dhanhq.MarketFeed to avoid
+    the asyncio event-loop replacement bug. Reconnects automatically with
+    exponential back-off.
     """
 
-    # Exchange segment string → MarketFeed class constant name + integer fallback
-    # Integers are stable across versions; class attrs preferred when available
-    _SEGMENT_ATTR = {
-        "NSE_IDX":  ("IDX",      0),
-        "NSE_EQ":   ("NSE",      1),
-        "NSE_FNO":  ("NSE_FNO",  2),
-        "NSE_CURR": ("NSE_CURR", 3),
-        "BSE_FNO":  ("BSE_FNO",  8),
-    }
+    _WS_URL = (
+        "wss://api-feed.dhan.co"
+        "?version=2&token={token}&clientId={client_id}&authType=2"
+    )
 
     def __init__(
         self,
@@ -84,13 +93,16 @@ class DhanWSClient(TickProvider):
         self._instrument_provider = instrument_provider
         self._reconnect_delay = reconnect_delay
 
+    def update_token(self, token: str) -> None:
+        self._access_token = token
+
     async def run(self) -> None:
         self._running = True
         delay = self._reconnect_delay
         while self._running:
             try:
                 await self._connect_and_stream()
-                delay = self._reconnect_delay  # reset backoff after a live session
+                delay = self._reconnect_delay   # reset on clean session
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -101,7 +113,6 @@ class DhanWSClient(TickProvider):
                 level("Dhan WS error: %s — reconnecting in %.0fs", exc, delay)
                 if self._running:
                     await asyncio.sleep(delay)
-                # Faster back-off on rate-limit (429), normal doubling otherwise
                 delay = min(delay * (3 if is_429 else 2), 120.0)
                 continue
             if self._running:
@@ -109,9 +120,9 @@ class DhanWSClient(TickProvider):
 
     async def _connect_and_stream(self) -> None:
         try:
-            from dhanhq import DhanContext, MarketFeed
+            import websockets
         except ImportError:
-            logger.error("dhanhq not installed — run: pip install dhanhq")
+            logger.error("websockets not installed — run: pip install websockets")
             await asyncio.sleep(30)
             return
 
@@ -121,65 +132,42 @@ class DhanWSClient(TickProvider):
             await asyncio.sleep(10)
             return
 
-        dhan_instruments = []
+        inst_list = []
         for inst in instruments:
-            entry = self._SEGMENT_ATTR.get(inst.exchange_segment)
-            if entry is None:
+            seg = _SEGMENT_SUB.get(inst.exchange_segment)
+            if seg is None:
                 logger.warning("Unknown exchange segment '%s' for %s — skipping",
                                inst.exchange_segment, inst.symbol)
                 continue
-            attr_name, fallback_int = entry
-            seg = getattr(MarketFeed, attr_name, fallback_int)
-            dhan_instruments.append((seg, inst.security_id, MarketFeed.Ticker))
+            inst_list.append({"ExchangeSegment": seg, "SecurityId": inst.security_id})
 
-        if not dhan_instruments:
+        if not inst_list:
             logger.error("No valid instruments after segment mapping")
             await asyncio.sleep(10)
             return
 
         sym_map = {inst.security_id: inst.symbol for inst in instruments}
+        url = self._WS_URL.format(token=self._access_token, client_id=self._client_id)
+        sub_msg = json.dumps({
+            "RequestCode": 15,   # 15 = Subscribe Ticker
+            "InstrumentCount": len(inst_list),
+            "InstrumentList": inst_list,
+        })
 
         logger.info("Dhan WS connecting — %d instruments: %s",
                     len(instruments), [i.symbol for i in instruments])
 
-        context = DhanContext(self._client_id, self._access_token)
-        feed = MarketFeed(context, dhan_instruments, "v2")
+        async with websockets.connect(url, open_timeout=15) as ws:
+            logger.info("Dhan WS connected")
+            await ws.send(sub_msg)
+            logger.info("Dhan WS subscribed to %d instruments", len(inst_list))
 
-        # Intercept dhanhq's server_disconnection() which only does print() internally.
-        # We capture stdout and re-emit through the logger so the reason is visible.
-        _orig_disc = feed.server_disconnection
-
-        def _patched_disc(data: bytes) -> None:
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                try:
-                    _orig_disc(data)
-                except Exception:
-                    pass
-            msg = buf.getvalue().strip()
-            if msg:
-                logger.error("Dhan server disconnect: %s", msg)
-            else:
-                # Parse raw bytes ourselves as fallback
-                try:
-                    code = struct.unpack("<H", data[8:10])[0]
-                    logger.error("Dhan server disconnect code=%d "
-                                 "(805=too many conns, 806=no subscription, "
-                                 "807=token expired, 808=bad client ID, 809=auth failed)", code)
-                except Exception:
-                    logger.error("Dhan server sent disconnect packet (payload: %s)", data[:16].hex())
-
-        feed.server_disconnection = _patched_disc  # type: ignore[method-assign]
-
-        # run_forever() calls asyncio.run() internally which crashes when
-        # another loop is already running (uvicorn). Use the async API directly.
-        await feed.connect()
-        logger.info("Dhan WS connected")
-
-        try:
             while self._running:
                 try:
-                    data = await feed.get_instrument_data()
+                    raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    logger.debug("Dhan WS: no tick in 30 s — still connected")
+                    continue
                 except Exception as recv_exc:
                     code   = getattr(recv_exc, "code", None)
                     reason = getattr(recv_exc, "reason", None)
@@ -188,46 +176,37 @@ class DhanWSClient(TickProvider):
                         if code == 1006:
                             hint = (
                                 " — Server closed without explanation. "
-                                "Check Dhan portal: (1) enable Market Feed / Live Data "
-                                "subscription under your app, (2) whitelist this server's "
-                                "IP under My Apps → Allowed IPs."
+                                "Check Dhan portal: (1) Market Feed subscription active, "
+                                "(2) server IP whitelisted under My Apps → Allowed IPs."
                             )
                         raise ConnectionError(
                             f"Dhan WS closed — code={code} reason={reason!r}{hint}"
                         ) from recv_exc
                     raise
 
-                if data is None:
-                    # Dhan sent a server-disconnect binary packet (first_byte=50).
-                    # dhanhq prints the reason code (805–809) to stdout; we re-raise
-                    # so the reconnect loop picks it up and the user sees it in the log.
-                    raise ConnectionError(
-                        "Dhan server sent disconnect packet — check journalctl stdout "
-                        "for error code: 807=token expired, 808=bad client ID, "
-                        "809=auth failed, 806=no subscription, 805=too many connections"
-                    )
-
-                tick = self._parse(data, sym_map)
-                if tick:
-                    await self._emit(tick)
-        finally:
-            try:
-                await feed.disconnect()
-            except Exception:
-                pass
+                if isinstance(raw, bytes):
+                    tick = self._parse_binary(raw, sym_map)
+                    if tick:
+                        await self._emit(tick)
+                # str messages are JSON ack/status frames — ignore
 
     @staticmethod
-    def _parse(data: dict, sym_map: dict[str, str]) -> Tick | None:
-        ltp = data.get("LTP") or data.get("ltp")
-        security_id = str(data.get("security_id", ""))
-        if not ltp or not security_id:
+    def _parse_binary(data: bytes, sym_map: dict[str, str]) -> Tick | None:
+        if len(data) < 12:
+            return None
+        packet_type = data[0]
+        if packet_type not in _LTP_PACKET_TYPES:
             return None
         try:
-            return Tick(
-                symbol=sym_map.get(security_id, security_id),
-                security_id=security_id,
-                ltp=float(ltp),
-                timestamp=time.time(),
-            )
-        except (ValueError, TypeError):
+            security_id = str(struct.unpack_from("<I", data, 4)[0])
+            ltp = struct.unpack_from("<f", data, 8)[0]
+        except struct.error:
             return None
+        if not ltp or security_id not in sym_map:
+            return None
+        return Tick(
+            symbol=sym_map[security_id],
+            security_id=security_id,
+            ltp=float(ltp),
+            timestamp=time.time(),
+        )
