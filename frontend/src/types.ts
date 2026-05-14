@@ -63,3 +63,4 @@ export type WSMessage =
   | ({ type: 'signal' } & Signal & { acted_on: boolean })
   | ({ type: 'trade_open' } & Trade)
   | ({ type: 'trade_close' } & Trade)
+  | { type: 'ping' }
