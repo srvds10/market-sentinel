@@ -9,10 +9,13 @@ notifies the SignalEngine of new symbol assignments.
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import logging
 import math
 import time
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Optional
 
 import httpx
@@ -34,6 +37,7 @@ class OptionStrike:
     is_call: bool
     delta: float
     ltp: float
+    expiry_days: int = 5  # days to expiry, used for BS delta calc
 
 
 @dataclass
@@ -174,96 +178,62 @@ class InstrumentManager:
         ] if i.security_id]
 
     # ------------------------------------------------------------------
-    # Dhan option chain API
+    # Instrument lookup via Dhan public scrip master (no auth required)
     # ------------------------------------------------------------------
 
+    # Dhan publishes a daily instrument master CSV — no API key needed.
+    _SCRIP_MASTER_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
+
+    # Hardcoded spot security IDs for major indices on NSE_IDX
+    _SPOT_SECURITY_IDS = {
+        "NIFTY":       "13",
+        "BANKNIFTY":   "25",
+        "FINNIFTY":    "27",
+        "MIDCPNIFTY":  "442",
+    }
+
     async def _fetch_map(self) -> InstrumentMap:
-        if not self._dhan_access_token:
-            raise ValueError("Dhan access token not set — update it via the UI Config panel")
+        """Build instrument map from the public Dhan scrip master CSV.
 
-        headers = {
-            "client-id":    self._dhan_client_id,
-            "access-token": self._dhan_access_token,
-            "Content-Type": "application/json",
-        }
-        is_index = self._instrument_name in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
-        underlying_type = "INDEX" if is_index else "EQUITY"
+        No authentication needed — the CSV is a public daily download.
+        We need the spot LTP to calculate ATM strike, so we use the
+        Dhan intraday chart API (which is in the official spec) as a
+        fallback spot source when the WebSocket hasn't connected yet.
+        If we have a current_map already, we reuse its spot_ltp.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(self._SCRIP_MASTER_URL)
+            if not resp.is_success:
+                raise ValueError(
+                    f"Dhan scrip master download failed ({resp.status_code}). "
+                    f"Check internet connectivity."
+                )
+            csv_text = resp.text
 
-        tok = self._dhan_access_token
-        logger.info("Calibrating — client_id=%s token=%s…%s (len=%d)",
-                    self._dhan_client_id, tok[:12], tok[-6:], len(tok))
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            # Step 1: get expiry list (ExpiryDate is required by Dhan — cannot be omitted)
-            expiry_resp = await client.post(
-                "https://api.dhan.co/v2/optionchain/expirylist",
-                headers=headers,
-                json={"UnderlyingScrip": self._instrument_name, "UnderlyingType": underlying_type},
-            )
-            if not expiry_resp.is_success:
-                logger.error("Expiry list API returned %d — %s",
-                             expiry_resp.status_code, expiry_resp.text[:300])
-                expiry_resp.raise_for_status()
-
-            expiry_data = expiry_resp.json()
-            expiry_list: list[str] = (
-                expiry_data.get("data", {}).get("ExpiryDate")
-                or expiry_data.get("expiryList")
-                or expiry_data.get("data", [])
-            )
-            if not expiry_list:
-                raise ValueError(f"Dhan returned empty expiry list: {expiry_resp.text[:200]}")
-
-            nearest_expiry = expiry_list[0]
-            logger.info("Using expiry %s (from %d available)", nearest_expiry, len(expiry_list))
-
-            # Step 2: fetch option chain for the nearest expiry
-            chain_resp = await client.post(
-                "https://api.dhan.co/v2/optionchain",
-                headers=headers,
-                json={
-                    "UnderlyingScrip": self._instrument_name,
-                    "UnderlyingType":  underlying_type,
-                    "ExpiryDate":      nearest_expiry,
-                },
-            )
-            if not chain_resp.is_success:
-                logger.error("Option chain API returned %d — %s",
-                             chain_resp.status_code, chain_resp.text[:500])
-                chain_resp.raise_for_status()
-
-            data = chain_resp.json()
-
-        return self._parse(data)
-
-    def _parse(self, data: dict) -> InstrumentMap:
-        spot       = float(data["underlyingValue"])
-        atm_strike = self._round_to_100(spot) if "BANK" in self._instrument_name \
-                     else self._round_to_50(spot)
-
-        calls: list[OptionStrike] = []
-        puts:  list[OptionStrike] = []
-        T     = 5.0 / 252.0   # approximate time-to-expiry
-        sigma = 0.14
-
-        for entry in data.get("data", []):
-            strike = float(entry["strikePrice"])
-            for side in ("CE", "PE"):
-                is_call     = side == "CE"
-                ltp         = float(entry.get(f"{side}ltp", 0) or 0)
-                security_id = str(entry.get(f"{side}securityId", ""))
-                symbol      = f"{self._instrument_name}-{int(strike)}-{side}"
-                delta       = bs_delta(spot, strike, T, sigma, is_call)
-                obj = OptionStrike(symbol=symbol, security_id=security_id,
-                                   strike_price=strike, is_call=is_call,
-                                   delta=round(delta, 4), ltp=ltp)
-                (calls if is_call else puts).append(obj)
+        # Parse: find nearest weekly/monthly expiry for this instrument
+        calls, puts = self._parse_scrip_master(csv_text)
 
         if not calls or not puts:
             raise ValueError(
-                f"Option chain returned no strikes for {self._instrument_name} "
-                f"(calls={len(calls)}, puts={len(puts)})"
+                f"No options found for {self._instrument_name} in scrip master"
             )
+
+        # Use existing spot LTP if available, otherwise fall back to a
+        # rough ATM calculation (will be corrected once WS ticks arrive)
+        spot = self._current_map.spot_ltp if self._current_map else 0.0
+        if spot <= 0:
+            # Try to get spot from intraday chart (authenticated)
+            spot = await self._fetch_spot_ltp()
+
+        atm_strike = self._round_to_100(spot) if "BANK" in self._instrument_name \
+                     else self._round_to_50(spot)
+
+        # Calculate BS delta for each strike
+        T     = max(calls[0].expiry_days, 1) / 252.0
+        sigma = 0.14
+        for s in calls + puts:
+            s.delta = round(bs_delta(spot, s.strike_price, T, sigma, s.is_call), 4)
+
         atm_call  = min(calls, key=lambda s: abs(s.strike_price - atm_strike))
         atm_put   = min(puts,  key=lambda s: abs(s.strike_price - atm_strike))
         otm_calls = [c for c in calls if c.strike_price > atm_strike]
@@ -271,7 +241,15 @@ class InstrumentManager:
         otm_call  = find_closest_delta_strike(otm_calls or calls, self._target_delta)
         otm_put   = find_closest_delta_strike(otm_puts  or puts,  self._target_delta)
 
-        spot_security_id = str(data.get("underlyingSecurityId", "13")) or "13"
+        spot_security_id = self._SPOT_SECURITY_IDS.get(self._instrument_name, "13")
+
+        logger.info(
+            "Scrip master calibrated — spot=%.0f ATM=%.0f T=%dd | "
+            "OTM call %s (Δ=%.3f) | OTM put %s (Δ=%.3f)",
+            spot, atm_strike, atm_call.expiry_days,
+            otm_call.symbol, otm_call.delta,
+            otm_put.symbol,  otm_put.delta,
+        )
 
         return InstrumentMap(
             timestamp        = time.time(),
@@ -284,6 +262,120 @@ class InstrumentManager:
             otm_call         = otm_call,
             otm_put          = otm_put,
         )
+
+    def _parse_scrip_master(self, csv_text: str) -> tuple[list[OptionStrike], list[OptionStrike]]:
+        """Parse Dhan scrip master CSV and return call/put OptionStrike lists
+        for the nearest expiry of self._instrument_name.
+
+        CSV columns (relevant ones):
+          SEM_EXM_EXCH_ID, SEM_SEGMENT, SEM_SMST_SECURITY_ID,
+          SEM_INSTRUMENT_NAME, SEM_EXPIRY_DATE (YYYY-MM-DD),
+          SEM_STRIKE_PRICE, SEM_OPTION_TYPE (CE/PE),
+          SEM_TRADING_SYMBOL, SEM_CUSTOM_SYMBOL
+        """
+        reader = csv.DictReader(io.StringIO(csv_text))
+        today  = date.today()
+
+        # Collect all upcoming expiries for this underlying
+        rows_by_expiry: dict[date, list[dict]] = {}
+        for row in reader:
+            seg  = row.get("SEM_SEGMENT", "")
+            inst = row.get("SEM_INSTRUMENT_NAME", "")
+            sym  = row.get("SEM_TRADING_SYMBOL", "") or row.get("SEM_CUSTOM_SYMBOL", "")
+            opt  = row.get("SEM_OPTION_TYPE", "")
+
+            if seg not in ("NSE_FNO", "NFO"):
+                continue
+            if inst not in ("OPTIDX", "OPTSTK"):
+                continue
+            if opt not in ("CE", "PE"):
+                continue
+            if not sym.startswith(self._instrument_name):
+                continue
+
+            exp_str = row.get("SEM_EXPIRY_DATE", "")
+            try:
+                exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+            except ValueError:
+                try:
+                    exp_date = datetime.strptime(exp_str, "%d-%b-%Y").date()
+                except ValueError:
+                    continue
+
+            if exp_date < today:
+                continue
+            rows_by_expiry.setdefault(exp_date, []).append(row)
+
+        if not rows_by_expiry:
+            raise ValueError(
+                f"No upcoming {self._instrument_name} options found in scrip master. "
+                f"The CSV may have different column names — first line: "
+                f"{csv_text[:200]}"
+            )
+
+        nearest_expiry = min(rows_by_expiry)
+        days_to_expiry = (nearest_expiry - today).days
+        logger.info("Scrip master: using expiry %s (%d days away)", nearest_expiry, days_to_expiry)
+
+        calls: list[OptionStrike] = []
+        puts:  list[OptionStrike] = []
+
+        for row in rows_by_expiry[nearest_expiry]:
+            try:
+                strike      = float(row.get("SEM_STRIKE_PRICE", 0))
+                security_id = str(row.get("SEM_SMST_SECURITY_ID", "")).strip()
+                opt_type    = row.get("SEM_OPTION_TYPE", "")
+                symbol      = f"{self._instrument_name}-{int(strike)}-{opt_type}"
+                is_call     = opt_type == "CE"
+                obj = OptionStrike(
+                    symbol=symbol, security_id=security_id,
+                    strike_price=strike, is_call=is_call,
+                    delta=0.0, ltp=0.0,
+                    expiry_days=max(days_to_expiry, 1),
+                )
+                (calls if is_call else puts).append(obj)
+            except (ValueError, KeyError):
+                continue
+
+        return sorted(calls, key=lambda s: s.strike_price), \
+               sorted(puts,  key=lambda s: s.strike_price)
+
+    async def _fetch_spot_ltp(self) -> float:
+        """Get NIFTY spot via Dhan intraday chart (requires auth).
+        Falls back to a hardcoded recent-ish value if auth fails.
+        """
+        if not self._dhan_access_token:
+            logger.warning("No token — using fallback spot for initial calibration")
+            return 24500.0  # rough NIFTY level; corrected once WS ticks arrive
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    "https://api.dhan.co/v2/charts/intraday",
+                    headers={
+                        "access-token": self._dhan_access_token,
+                        "client-id":    self._dhan_client_id,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "securityId":      "13",
+                        "exchangeSegment": "IDX_I",
+                        "instrument":      "INDEX",
+                        "interval":        "1",
+                        "fromDate":        date.today().strftime("%Y-%m-%d"),
+                        "toDate":          date.today().strftime("%Y-%m-%d"),
+                    },
+                )
+                if resp.is_success:
+                    data = resp.json()
+                    closes = data.get("close", [])
+                    if closes:
+                        return float(closes[-1])
+        except Exception as e:
+            logger.warning("Spot fetch via chart API failed: %s", e)
+
+        logger.warning("Could not get live spot — using fallback; will recalibrate after first tick")
+        return 24500.0
 
     @staticmethod
     def _round_to_50(price: float) -> float:
