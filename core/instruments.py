@@ -303,12 +303,12 @@ class InstrumentManager:
                     "seg": row.get("SEM_SEGMENT", ""),
                 })
 
-            # Underlying check: prefer SM_SYMBOL_NAME, fall back to trading symbol prefix
-            underlying = sm_sym if sm_sym else sym.upper()
-            if not underlying.startswith(name_upper):
+            # Underlying check via trading symbol prefix (SM_SYMBOL_NAME is an
+            # internal Dhan code like 'SX50OPT', not the human-readable name)
+            if not sym.upper().startswith(name_upper):
                 continue
 
-            # Determine CE/PE: use SEM_OPTION_TYPE if recognisable, else symbol suffix
+            # Determine CE/PE from SEM_OPTION_TYPE; fall back to symbol suffix
             sym_upper = sym.upper()
             if opt_raw in ("CE", "C") or sym_upper.endswith("CE"):
                 is_call: bool | None = True
@@ -317,7 +317,8 @@ class InstrumentManager:
             else:
                 continue
 
-            exp_str = row.get("SEM_EXPIRY_DATE", "").strip()
+            # Expiry may include time ('2026-05-27 15:30:00') — slice to date part
+            exp_str = row.get("SEM_EXPIRY_DATE", "").strip()[:10]
             try:
                 exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
             except ValueError:
