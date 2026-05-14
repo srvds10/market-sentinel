@@ -65,6 +65,15 @@ _SEGMENT_SUB: dict[str, str] = {
 # Packet type bytes that carry an LTP field at offset 8
 _LTP_PACKET_TYPES = frozenset({2, 6})
 
+# Dhan disconnect packet: first byte = 50 (0x32), reason code at bytes 8-9 (uint16 LE)
+_DISCONNECT_REASONS: dict[int, str] = {
+    805: "too many connections",
+    806: "session limit exceeded",
+    807: "access token expired",
+    808: "invalid client ID",
+    809: "authentication failed",
+}
+
 
 class DhanWSClient(TickProvider):
     """Live Nifty feed via Dhan HQ WebSocket.
@@ -185,6 +194,10 @@ class DhanWSClient(TickProvider):
                     raise
 
                 if isinstance(raw, bytes):
+                    if len(raw) >= 1 and raw[0] == 50:  # disconnect packet
+                        reason_code = struct.unpack_from("<H", raw, 8)[0] if len(raw) >= 10 else 0
+                        reason_str = _DISCONNECT_REASONS.get(reason_code, f"code={reason_code}")
+                        raise ConnectionError(f"Dhan WS disconnect packet — {reason_str}")
                     tick = self._parse_binary(raw, sym_map)
                     if tick:
                         await self._emit(tick)

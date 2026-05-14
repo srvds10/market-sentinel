@@ -18,6 +18,12 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.environ.get("SENTINEL_ENV_FILE", "/opt/market-sentinel/.env"))
+except ImportError:
+    pass
+
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
