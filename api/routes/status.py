@@ -36,6 +36,8 @@ async def get_status(request: Request) -> dict:
         "last_z_score":       state.last_z_score,
         "last_ratio":         state.last_ratio,
         "z_sample_count":     state.z_sample_count,
+        "market_bias":        state.market_bias,
+        "spot_delta_5m":      state.spot_delta_5m,
         "capital":            state.capital,
         "daily_pnl":          state.daily_pnl,
         "daily_pnl_pct":      state.daily_pnl_pct,

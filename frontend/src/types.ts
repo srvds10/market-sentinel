@@ -1,5 +1,7 @@
 export type EngineState = 'IDLE' | 'WARMING_UP' | 'ACTIVE' | 'KILLED' | 'CLOSED'
 
+export type MarketBias = 'BULLISH' | 'BEARISH' | 'SIDEWAYS' | 'UNKNOWN'
+
 export interface StatusPayload {
   engine_state: EngineState
   spot_ltp: number
@@ -9,6 +11,8 @@ export interface StatusPayload {
   last_z_score: number | null
   last_ratio: number | null
   z_sample_count: number
+  market_bias: MarketBias
+  spot_delta_5m: number | null
   capital: number
   daily_pnl: number
   daily_pnl_pct: number

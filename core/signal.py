@@ -124,6 +124,8 @@ class SignalConfig:
     zscore_threshold: float = 2.0
     zscore_lookback_minutes: float = 20.0
     min_history_samples: int = 30
+    bias_window_seconds: float = 300.0   # 5-min rolling window for market bias
+    bias_threshold: float = 20.0         # ±NIFTY pts in 5 min to declare trend
 
 
 class SignalEngine:
@@ -142,6 +144,7 @@ class SignalEngine:
             lookback_minutes=config.zscore_lookback_minutes,
             min_samples=config.min_history_samples,
         )
+        self._bias_window = RollingWindow(config.bias_window_seconds)
 
         # These are updated by InstrumentManager on recalibration
         self._spot_symbol: str = ""
@@ -202,6 +205,10 @@ class SignalEngine:
         if win is None:
             return None
         win.push(tick.ltp, tick.timestamp)
+
+        # Track spot in the 5-min bias window
+        if tick.symbol == self._spot_symbol:
+            self._bias_window.push(tick.ltp, tick.timestamp)
 
         # Need at least spot + one OTM window populated
         if tick.symbol not in (self._otm_call_symbol, self._otm_put_symbol):
@@ -282,6 +289,21 @@ class SignalEngine:
     # ------------------------------------------------------------------
     # Diagnostics
     # ------------------------------------------------------------------
+
+    def market_bias(self) -> tuple[str, float | None]:
+        """Return (label, spot_delta_5min).
+
+        label is one of: 'BULLISH' | 'BEARISH' | 'SIDEWAYS' | 'UNKNOWN'
+        UNKNOWN means the 5-min window doesn't have enough data yet.
+        """
+        delta = self._bias_window.delta()
+        if delta is None:
+            return "UNKNOWN", None
+        if delta >= self.config.bias_threshold:
+            return "BULLISH", round(delta, 2)
+        if delta <= -self.config.bias_threshold:
+            return "BEARISH", round(delta, 2)
+        return "SIDEWAYS", round(delta, 2)
 
     def z_score_sample_count(self) -> int:
         return self._zscore.sample_count()

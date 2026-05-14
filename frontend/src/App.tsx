@@ -3,6 +3,7 @@ import clsx from 'clsx'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 
 import { ZScoreGauge } from './components/ZScoreGauge'
+import { MarketBias } from './components/MarketBias'
 import { SignalFeed } from './components/SignalFeed'
 import { PositionTracker } from './components/PositionTracker'
 import { TradeBlotter } from './components/TradeBlotter'
@@ -197,6 +198,12 @@ export default function App() {
               </div>
             </div>
           </div>
+
+          {/* Market bias */}
+          <MarketBias
+            bias={status.market_bias ?? 'UNKNOWN'}
+            delta5m={status.spot_delta_5m ?? null}
+          />
 
           {/* Signal feed */}
           <div className="rounded-lg border border-border bg-panel p-3 flex-1 min-h-0 overflow-hidden">

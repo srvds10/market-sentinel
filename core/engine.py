@@ -65,6 +65,8 @@ class AppState:
     last_z_score: float | None = None
     last_ratio: float | None = None
     z_sample_count: int = 0
+    market_bias: str = "UNKNOWN"
+    spot_delta_5m: float | None = None
     capital: float = 0.0
     daily_pnl: float = 0.0
     daily_pnl_pct: float = 0.0
@@ -125,6 +127,8 @@ class Engine:
             zscore_threshold=sig_cfg["zscore_threshold"],
             zscore_lookback_minutes=sig_cfg["zscore_lookback_minutes"],
             min_history_samples=sig_cfg["min_history_samples"],
+            bias_window_seconds=sig_cfg.get("bias_window_seconds", 300.0),
+            bias_threshold=sig_cfg.get("bias_threshold", 20.0),
         ))
 
         exc_cfg = self._cfg["execution"]
@@ -270,6 +274,9 @@ class Engine:
             signal_candidate: SignalEvent | None = self._signal_engine.on_tick(tick)
             self.state.z_sample_count = self._signal_engine.z_score_sample_count()
             self.state.last_z_score = self._signal_engine.current_z_score()
+            bias, delta_5m = self._signal_engine.market_bias()
+            self.state.market_bias   = bias
+            self.state.spot_delta_5m = delta_5m
 
             # Advance to ACTIVE after warmup; track countdown for UI
             if self.state.engine_state == EngineState.WARMING_UP:
@@ -437,6 +444,8 @@ class Engine:
                 "daily_pnl":      self.state.daily_pnl,
                 "daily_pnl_pct":  self.state.daily_pnl_pct,
                 "z_sample_count": self.state.z_sample_count,
+                "market_bias":    self.state.market_bias,
+                "spot_delta_5m":  self.state.spot_delta_5m,
             })
             await asyncio.sleep(2.0)
 

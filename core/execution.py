@@ -94,11 +94,11 @@ class PaperTrade:
 
 @dataclass
 class ExecutionConfig:
-    virtual_capital: float = 1_000_000.0
+    virtual_capital: float = 100_000.0
     max_position_pct: float = 0.20
-    stop_loss_pct: float = 0.30
-    trailing_stop_activation_pct: float = 0.20
-    trailing_stop_pct: float = 0.15
+    stop_loss_pct: float = 0.20
+    trailing_stop_activation_pct: float = 0.10
+    trailing_stop_pct: float = 0.02
     cooldown_minutes: float = 15.0
     morning_filter_start: str = "09:15"
     morning_filter_end: str = "09:30"
