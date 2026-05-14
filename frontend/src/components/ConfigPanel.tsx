@@ -4,16 +4,18 @@ import { fetchConfig, patchConfig, updateToken, downloadLogs, clearLogs, fetchLo
 
 type ConfigMap = Record<string, Record<string, unknown>>
 
-const EDITABLE: Array<{ section: string; key: string; label: string; type: 'number' | 'text' }> = [
+// scale: multiply raw config value by this for display; divide on save.
+// Percentage fields are stored as decimals (0.30) but shown as whole numbers (30).
+const EDITABLE: Array<{ section: string; key: string; label: string; type: 'number' | 'text'; scale?: number }> = [
   { section: 'execution', key: 'virtual_capital',               label: 'Virtual capital (₹)',     type: 'number' },
   { section: 'signal',    key: 'zscore_threshold',              label: 'Z-Score threshold',        type: 'number' },
   { section: 'signal',    key: 'min_spot_delta',                label: 'Min spot Δ (points)',      type: 'number' },
   { section: 'signal',    key: 'zscore_lookback_minutes',       label: 'Z lookback (min)',         type: 'number' },
-  { section: 'execution', key: 'stop_loss_pct',                 label: 'Stop loss %',             type: 'number' },
-  { section: 'execution', key: 'trailing_stop_activation_pct',  label: 'Trail activation %',      type: 'number' },
-  { section: 'execution', key: 'trailing_stop_pct',             label: 'Trail floor %',           type: 'number' },
+  { section: 'execution', key: 'stop_loss_pct',                 label: 'Stop loss %',             type: 'number', scale: 100 },
+  { section: 'execution', key: 'trailing_stop_activation_pct',  label: 'Trail activation %',      type: 'number', scale: 100 },
+  { section: 'execution', key: 'trailing_stop_pct',             label: 'Trail floor %',           type: 'number', scale: 100 },
   { section: 'execution', key: 'cooldown_minutes',              label: 'Cooldown (min)',           type: 'number' },
-  { section: 'execution', key: 'daily_drawdown_kill_pct',       label: 'Kill switch drawdown %',  type: 'number' },
+  { section: 'execution', key: 'daily_drawdown_kill_pct',       label: 'Kill switch drawdown %',  type: 'number', scale: 100 },
   { section: 'execution', key: 'morning_filter_start',          label: 'Morning start (HH:MM)',   type: 'text'   },
   { section: 'execution', key: 'morning_filter_end',            label: 'Morning end (HH:MM)',     type: 'text'   },
 ]
@@ -40,12 +42,18 @@ export function ConfigPanel() {
 
   const handleChange = (section: string, key: string, raw: string) => {
     const field = EDITABLE.find(f => f.section === section && f.key === key)
+    // Store display value as-is; scale is applied only on save
     const value = field?.type === 'number' ? parseFloat(raw) : raw
     setCfg(prev => ({ ...prev, [section]: { ...prev[section], [key]: value } }))
   }
 
   const handleSave = async (section: string, key: string) => {
-    const value = cfg[section]?.[key]
+    const field = EDITABLE.find(f => f.section === section && f.key === key)
+    const displayValue = cfg[section]?.[key]
+    // Convert display value back to raw config (e.g. 30 → 0.30 for pct fields)
+    const value = (field?.scale && typeof displayValue === 'number')
+      ? displayValue / field.scale
+      : displayValue
     setSaving(`${section}.${key}`)
     try {
       await patchConfig(section, key, value)
@@ -150,8 +158,10 @@ export function ConfigPanel() {
       {/* ── Config fields ── */}
       <div className="flex flex-col gap-2">
         <div className="text-muted uppercase tracking-wider text-[10px]">Engine Parameters</div>
-        {EDITABLE.map(({ section, key, label, type }) => {
-          const val = String(cfg[section]?.[key] ?? '')
+        {EDITABLE.map(({ section, key, label, type, scale }) => {
+          const raw = cfg[section]?.[key]
+          const displayed = (scale && typeof raw === 'number') ? raw * scale : raw
+          const val = String(displayed ?? '')
           const id  = `${section}.${key}`
           return (
             <div key={id} className="flex items-center gap-2">
