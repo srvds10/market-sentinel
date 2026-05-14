@@ -16,7 +16,7 @@ signal:
   min_history_samples: 30     # minimum samples before Z-score is trusted
   target_delta_min: 0.10      # OTM strike delta lower bound
   target_delta_max: 0.15      # OTM strike delta upper bound
-  recalibration_interval_minutes: 30  # how often to re-anchor ATM/OTM strikes
+  recalibration_interval_minutes: 1    # how often to re-anchor ATM/OTM strikes
 
 execution:
   paper_trading: true
