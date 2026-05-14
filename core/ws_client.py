@@ -1,14 +1,12 @@
 """
 Tick provider: Dhan HQ live market data WebSocket.
 
-Uses the official dhanhq MarketFeed (v2.1.0+ API):
-  from dhanhq import DhanContext, MarketFeed
+Uses dhanhq async API directly (bypasses run_forever which calls
+asyncio.run() and crashes when uvicorn's loop is already running):
 
-Exchange segment and subscription constants are class attributes:
-  MarketFeed.IDX, MarketFeed.NSE_FNO, MarketFeed.Ticker etc.
-
-run_forever() starts the feed in a background thread. We poll
-get_data() via run_in_executor so the asyncio event loop is never blocked.
+  await feed.connect()
+  data = await feed.get_instrument_data()   # yields to event loop while waiting
+  await feed.disconnect()
 """
 
 from __future__ import annotations
@@ -134,26 +132,21 @@ class DhanWSClient(TickProvider):
         context = DhanContext(self._client_id, self._access_token)
         feed = MarketFeed(context, dhan_instruments, "v2")
 
-        loop = asyncio.get_running_loop()
+        # run_forever() calls asyncio.run() internally which crashes when
+        # another loop is already running (uvicorn). Use the async API directly.
+        await feed.connect()
+        logger.info("Dhan WS connected")
 
         try:
-            # run_forever() starts the WebSocket in a background thread (non-blocking)
-            feed.run_forever()
-            logger.info("Dhan WS connected")
-
             while self._running:
-                # get_data() may block briefly — run in executor to keep event loop free
-                data = await loop.run_in_executor(None, feed.get_data)
+                data = await feed.get_instrument_data()
                 if data:
                     tick = self._parse(data, sym_map)
                     if tick:
                         await self._emit(tick)
-                else:
-                    await asyncio.sleep(0.05)
-
         finally:
             try:
-                feed.close_connection()
+                await feed.disconnect()
             except Exception:
                 pass
 
