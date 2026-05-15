@@ -229,6 +229,15 @@ class ExecutionEngine:
         # Realistic fill: we buy at ask, so entry price = LTP + slippage
         entry_price = atm_ltp + self.config.slippage_rupees
 
+        # Guard against degenerate inputs that would otherwise divide by zero
+        # below (e.g. atm_ltp ≈ 0 with slippage 0, or a misconfigured lot_size).
+        if entry_price <= 0 or self.config.lot_size <= 0:
+            logger.warning(
+                "Open skipped: invalid sizing inputs entry_price=%.4f lot_size=%d",
+                entry_price, self.config.lot_size,
+            )
+            return None
+
         capital_at_risk = self._capital * self.config.max_position_pct
         max_lots = max(1, int(capital_at_risk / (entry_price * self.config.lot_size)))
 
@@ -295,6 +304,8 @@ class ExecutionEngine:
         return None
 
     def _trailing_activated(self, trade: PaperTrade, ltp: float) -> bool:
+        if trade.entry_price <= 0:
+            return False
         profit_pct = (ltp - trade.entry_price) / trade.entry_price
         return profit_pct >= trade.trailing_activation_pct
 

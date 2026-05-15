@@ -302,7 +302,11 @@ class SignalEngine:
             direction = "PUT"
             otm_sym = self._otm_put_symbol
 
-        # Robust ratio: |ΔOption / ΔSpot| — spot is in denominator (never zero after filter)
+        # Robust ratio: |ΔOption / ΔSpot|. The min_spot_delta filter normally
+        # keeps delta_spot away from zero, but defend against a misconfigured
+        # threshold of 0 that would let a zero through.
+        if delta_spot == 0:
+            return None
         ratio = abs(delta_otm / delta_spot)
 
         self._zscore.push(ratio, ts)
