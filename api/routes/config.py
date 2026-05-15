@@ -117,10 +117,17 @@ class TokenUpdate(BaseModel):
 
 @router.post("/token")
 async def update_token(body: TokenUpdate, request: Request) -> dict:
-    """Update Dhan access token in .env and trigger engine WS reconnect."""
+    """Update Dhan access token in .env and trigger engine WS reconnect only if changed."""
     token = body.access_token.strip()
     if not token:
         raise HTTPException(status_code=400, detail="Token cannot be empty")
+
+    # Check if token has actually changed
+    cfg = request.app.state.config
+    old_token = cfg.get("dhan", {}).get("access_token", "")
+    if token == old_token:
+        logger.info("Dhan access token: no change (same value)")
+        return {"ok": True, "message": "Token unchanged — no reconnect needed."}
 
     # Update .env file
     env_path = Path("/opt/market-sentinel/.env")
@@ -148,5 +155,5 @@ async def update_token(body: TokenUpdate, request: Request) -> dict:
     if hasattr(engine_state, "reconnect_event"):
         engine_state.reconnect_event.set()
 
-    logger.info("Dhan access token updated — reconnect triggered")
+    logger.info("Dhan access token updated (changed) — reconnect triggered")
     return {"ok": True, "message": "Token updated. Engine reconnecting with new credentials."}
