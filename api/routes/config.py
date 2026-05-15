@@ -54,6 +54,37 @@ async def get_config(request: Request) -> dict:
     return {s: cfg.get(s, {}) for s in _SAFE_SECTIONS}
 
 
+def _apply_live(request: Request, section: str, key: str, value: Any) -> None:
+    """Propagate a config change into the live engine dataclasses.
+
+    Keys read each tick (cooldown_minutes, zscore_threshold, …) take effect
+    immediately. Keys snapshotted at trade open (stop_loss_pct, trailing_*)
+    take effect on the next trade — existing open trades are unaffected by
+    design so their original rule set stays intact.
+    """
+    exc = getattr(request.app.state, "execution_engine", None)
+    sig = getattr(request.app.state, "signal_engine", None)
+
+    if section == "execution" and exc is not None:
+        if key == "virtual_capital" and not exc.open_trade:
+            new_cap = float(value)
+            exc.config.virtual_capital = new_cap
+            exc._capital = new_cap
+            exc._start_capital = new_cap
+            exc._day_start_capital = new_cap
+            request.app.state.engine_state.capital = new_cap
+        elif hasattr(exc.config, key):
+            setattr(exc.config, key, value)
+
+    elif section == "signal" and sig is not None:
+        if hasattr(sig.config, key):
+            setattr(sig.config, key, value)
+        # ZScoreTracker captures lookback at __init__; mirror the update
+        # onto the live tracker so the rolling window resizes immediately.
+        if key == "zscore_lookback_minutes":
+            sig._zscore.lookback_seconds = float(value) * 60.0
+
+
 @router.post("/config")
 async def patch_config(patch: ConfigPatch, request: Request) -> dict:
     if (patch.section, patch.key) not in MUTABLE_KEYS:
@@ -65,6 +96,8 @@ async def patch_config(patch: ConfigPatch, request: Request) -> dict:
 
     old_value = cfg[patch.section].get(patch.key)
     cfg[patch.section][patch.key] = patch.value
+
+    _apply_live(request, patch.section, patch.key, patch.value)
 
     # Persist to disk
     config_path = getattr(request.app.state, "config_path", "config.yaml")
@@ -104,6 +137,11 @@ async def update_token(body: TokenUpdate, request: Request) -> dict:
 
     # Update running config in memory
     request.app.state.config.setdefault("dhan", {})["access_token"] = token
+
+    # Hot-update InstrumentManager so it uses the new token immediately
+    im = getattr(request.app.state, "instrument_manager", None)
+    if im is not None:
+        im.update_token(token)
 
     # Signal engine to reconnect WS with new token
     engine_state = request.app.state.engine_state

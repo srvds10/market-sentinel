@@ -74,6 +74,8 @@ class Database:
         self._db: aiosqlite.Connection | None = None
 
     async def open(self) -> None:
+        if self._db is not None:
+            return
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(self._path)
         self._db.row_factory = aiosqlite.Row
@@ -151,7 +153,8 @@ class Database:
 
     async def get_signals(self, limit: int = 50) -> list[dict]:
         async with self._db.execute(
-            "SELECT * FROM signal_events ORDER BY fired_at DESC LIMIT ?",
+            "SELECT *, fired_at AS timestamp FROM signal_events "
+            "ORDER BY fired_at DESC LIMIT ?",
             (limit,),
         ) as cur:
             rows = await cur.fetchall()

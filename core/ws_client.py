@@ -1,12 +1,17 @@
 """
-Tick providers.
+Tick provider: Dhan HQ live market data WebSocket.
 
-DhanWSClient  — connects to the real Dhan HQ market-data WebSocket.
-MockTickFeed  — generates synthetic Brownian-motion ticks with occasional
-                IV-spike events so the signal engine can be tested without
-                live credentials.
+Connects directly via the websockets library, parsing Dhan's binary ticker
+protocol. This avoids dhanhq.MarketFeed.__init__ calling asyncio.set_event_loop()
+which replaces uvicorn's running loop and causes code=1006 disconnects.
 
-Both yield Tick objects via an asyncio.Queue injected at construction time.
+Binary ticker packet layout (16 bytes):
+  offset 0   uint8   packet_type  (2 = Ticker, 6 = extended ticker)
+  offset 1   uint8   exchange_segment
+  offset 2   uint16  reserved
+  offset 4   uint32  security_id  (little-endian)
+  offset 8   float32 ltp          (little-endian)
+  offset 12  uint32  timestamp    (Unix seconds, little-endian)
 """
 
 from __future__ import annotations
@@ -14,37 +19,31 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
-import random
 import struct
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
-
-import websockets
-from websockets.exceptions import ConnectionClosedError, WebSocketException
+from typing import Callable
 
 from core.signal import Tick
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Abstract base
-# ---------------------------------------------------------------------------
+@dataclass
+class DhanInstrument:
+    security_id: str
+    exchange_segment: str   # "NSE_IDX" | "NSE_FNO" | "NSE_EQ"
+    symbol: str             # human-readable label used as Tick.symbol
+
 
 class TickProvider(ABC):
-    """Push Tick objects into queue; caller owns the queue."""
-
     def __init__(self, queue: asyncio.Queue[Tick]) -> None:
         self._queue = queue
         self._running = False
 
     @abstractmethod
-    async def run(self) -> None:
-        """Runs until stop() is called or a fatal error occurs."""
-        ...
+    async def run(self) -> None: ...
 
     def stop(self) -> None:
         self._running = False
@@ -53,240 +52,177 @@ class TickProvider(ABC):
         await self._queue.put(tick)
 
 
-# ---------------------------------------------------------------------------
-# Dhan HQ WebSocket client
-# ---------------------------------------------------------------------------
+# Exchange segment string → subscription string used in JSON payload
+_SEGMENT_SUB: dict[str, str] = {
+    "NSE_IDX":  "IDX_I",
+    "NSE_EQ":   "NSE_EQ",
+    "NSE_FNO":  "NSE_FNO",
+    "NSE_CURR": "NSE_CURR",
+    "BSE_EQ":   "BSE_EQ",
+    "BSE_FNO":  "BSE_FNO",
+}
 
-# Dhan feed uses a binary/JSON hybrid.  The subscription message is JSON;
-# tick frames are binary structs prefixed by a 2-byte message type.
-# See: https://dhanhq.co/docs/v2/live-market-feed/
+# Packet type bytes that carry an LTP field at offset 8
+_LTP_PACKET_TYPES = frozenset({2, 6})
 
-_DHAN_FEED_URL = "wss://api-feed.dhan.co"
-_MSG_TYPE_TICKER = 0x01
-_MSG_TYPE_FULL   = 0x15
-
-
-@dataclass
-class DhanInstrument:
-    security_id: str
-    exchange_segment: str   # e.g. "NSE_EQ", "NSE_FNO"
-    symbol: str
+# Dhan disconnect packet: first byte = 50 (0x32), reason code at bytes 8-9 (uint16 LE)
+_DISCONNECT_REASONS: dict[int, str] = {
+    805: "too many connections",
+    806: "session limit exceeded",
+    807: "access token expired",
+    808: "invalid client ID",
+    809: "authentication failed",
+}
 
 
 class DhanWSClient(TickProvider):
-    """Live feed from Dhan HQ market data WebSocket.
+    """Live Nifty feed via Dhan HQ WebSocket.
 
-    Automatically reconnects on disconnection.  Caller should wrap run()
-    in a task and cancel it to shut down.
+    Uses the websockets library directly instead of dhanhq.MarketFeed to avoid
+    the asyncio event-loop replacement bug. Reconnects automatically with
+    exponential back-off.
     """
+
+    _WS_URL = (
+        "wss://api-feed.dhan.co"
+        "?version=2&token={token}&clientId={client_id}&authType=2"
+    )
 
     def __init__(
         self,
         queue: asyncio.Queue[Tick],
         client_id: str,
         access_token: str,
-        instruments: list[DhanInstrument],
+        instrument_provider: Callable[[], list[DhanInstrument]],
         reconnect_delay: float = 5.0,
     ) -> None:
         super().__init__(queue)
         self._client_id = client_id
         self._access_token = access_token
-        self._instruments = instruments
+        self._instrument_provider = instrument_provider
         self._reconnect_delay = reconnect_delay
+
+    def update_token(self, token: str) -> None:
+        self._access_token = token
 
     async def run(self) -> None:
         self._running = True
+        delay = self._reconnect_delay
         while self._running:
             try:
                 await self._connect_and_stream()
-            except (ConnectionClosedError, WebSocketException, OSError) as exc:
-                logger.warning("Dhan WS disconnected: %s — reconnecting in %ss",
-                               exc, self._reconnect_delay)
+                delay = self._reconnect_delay   # reset on clean session
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.error("Unexpected WS error: %s", exc, exc_info=True)
+                exc_str = str(exc)
+                is_429  = "429" in exc_str
+                is_disc = "disconnect packet" in exc_str or "code=" in exc_str
+                level   = logger.error if is_disc else logger.warning
+                level("Dhan WS error: %s — reconnecting in %.0fs", exc, delay)
+                if self._running:
+                    await asyncio.sleep(delay)
+                delay = min(delay * (3 if is_429 else 2), 120.0)
+                continue
             if self._running:
-                await asyncio.sleep(self._reconnect_delay)
+                await asyncio.sleep(delay)
 
     async def _connect_and_stream(self) -> None:
-        async with websockets.connect(
-            _DHAN_FEED_URL,
-            extra_headers={
-                "client-id": self._client_id,
-                "authorization": f"Bearer {self._access_token}",
-            },
-        ) as ws:
-            logger.info("Dhan WS connected")
-            await ws.send(self._subscription_payload())
-            async for raw in ws:
-                if not self._running:
-                    break
-                tick = self._parse_frame(raw)
-                if tick:
-                    await self._emit(tick)
+        try:
+            import websockets
+        except ImportError:
+            logger.error("websockets not installed — run: pip install websockets")
+            await asyncio.sleep(30)
+            return
 
-    def _subscription_payload(self) -> str:
-        instruments = [
-            {"security_id": i.security_id, "exchange_segment": i.exchange_segment}
-            for i in self._instruments
-        ]
-        return json.dumps({
-            "action": "subscribe",
-            "mode": "ticker",
-            "instruments": instruments,
+        instruments = self._instrument_provider()
+        if not instruments:
+            logger.warning("No instruments yet — waiting for InstrumentManager")
+            await asyncio.sleep(10)
+            return
+
+        inst_list = []
+        for inst in instruments:
+            seg = _SEGMENT_SUB.get(inst.exchange_segment)
+            if seg is None:
+                logger.warning("Unknown exchange segment '%s' for %s — skipping",
+                               inst.exchange_segment, inst.symbol)
+                continue
+            inst_list.append({"ExchangeSegment": seg, "SecurityId": inst.security_id})
+
+        if not inst_list:
+            logger.error("No valid instruments after segment mapping")
+            await asyncio.sleep(10)
+            return
+
+        sym_map = {inst.security_id: inst.symbol for inst in instruments}
+        url = self._WS_URL.format(token=self._access_token, client_id=self._client_id)
+        sub_msg = json.dumps({
+            "RequestCode": 15,   # 15 = Subscribe Ticker
+            "InstrumentCount": len(inst_list),
+            "InstrumentList": inst_list,
         })
 
-    def _parse_frame(self, raw: bytes | str) -> Tick | None:
-        if isinstance(raw, str):
+        logger.info(
+            "Dhan WS connecting — %d instruments: %s  (client_id=%r  token_len=%d)",
+            len(instruments), [i.symbol for i in instruments],
+            self._client_id or "(empty)", len(self._access_token),
+        )
+
+        async with websockets.connect(url, open_timeout=15) as ws:
+            logger.info("Dhan WS connected")
+            await ws.send(sub_msg)
+            logger.info("Dhan WS subscribed to %d instruments", len(inst_list))
+
+            while self._running:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    logger.debug("Dhan WS: no tick in 30 s — still connected")
+                    continue
+                except Exception as recv_exc:
+                    code   = getattr(recv_exc, "code", None)
+                    reason = getattr(recv_exc, "reason", None)
+                    if code is not None or reason is not None:
+                        hint = ""
+                        if code == 1006:
+                            hint = (
+                                " — Server closed without explanation. "
+                                "Check Dhan portal: (1) Market Feed subscription active, "
+                                "(2) server IP whitelisted under My Apps → Allowed IPs."
+                            )
+                        raise ConnectionError(
+                            f"Dhan WS closed — code={code} reason={reason!r}{hint}"
+                        ) from recv_exc
+                    raise
+
+                if isinstance(raw, bytes):
+                    if len(raw) >= 1 and raw[0] == 50:  # disconnect packet
+                        reason_code = struct.unpack_from("<H", raw, 8)[0] if len(raw) >= 10 else 0
+                        reason_str = _DISCONNECT_REASONS.get(reason_code, f"code={reason_code}")
+                        raise ConnectionError(f"Dhan WS disconnect packet — {reason_str}")
+                    tick = self._parse_binary(raw, sym_map)
+                    if tick:
+                        await self._emit(tick)
+                # str messages are JSON ack/status frames — ignore
+
+    @staticmethod
+    def _parse_binary(data: bytes, sym_map: dict[str, str]) -> Tick | None:
+        if len(data) < 12:
             return None
-        if len(raw) < 3:
-            return None
-        msg_type = raw[0]
-        if msg_type not in (_MSG_TYPE_TICKER, _MSG_TYPE_FULL):
+        packet_type = data[0]
+        if packet_type not in _LTP_PACKET_TYPES:
             return None
         try:
-            # Dhan binary ticker layout (simplified):
-            # [0]  1B  message_type
-            # [1]  1B  exchange_segment
-            # [2:6]  4B  security_id (uint32)
-            # [6:10] 4B  LTP (float32)
-            # [10:14] 4B LTQ (uint32)
-            # [14:18] 4B  OI  (uint32)
-            security_id = str(struct.unpack_from(">I", raw, 2)[0])
-            ltp = struct.unpack_from(">f", raw, 6)[0]
-            # Map security_id back to symbol
-            sym = next(
-                (i.symbol for i in self._instruments if i.security_id == security_id),
-                security_id,
-            )
-            return Tick(
-                symbol=sym,
-                security_id=security_id,
-                ltp=round(float(ltp), 2),
-                timestamp=time.time(),
-            )
+            security_id = str(struct.unpack_from("<I", data, 4)[0])
+            ltp = struct.unpack_from("<f", data, 8)[0]
         except struct.error:
             return None
-
-
-# ---------------------------------------------------------------------------
-# Mock tick feed  (Brownian motion + occasional IV-spike events)
-# ---------------------------------------------------------------------------
-
-class MockTickFeed(TickProvider):
-    """Synthetic tick feed for development and testing.
-
-    Simulates:
-    - Nifty spot as geometric Brownian motion
-    - ATM / OTM options priced via a fast Black-Scholes approximation
-    - Random IV spikes every 3–8 minutes that should trigger the signal engine
-    """
-
-    # ---- instrument symbols used by the mock feed ----
-    SPOT        = "NIFTY-SPOT"
-    ATM_CALL    = "NIFTY-ATM-CE"
-    ATM_PUT     = "NIFTY-ATM-PE"
-    OTM_CALL    = "NIFTY-OTM-CE"
-    OTM_PUT     = "NIFTY-OTM-PE"
-
-    def __init__(
-        self,
-        queue: asyncio.Queue[Tick],
-        spot_start: float = 22_000.0,
-        iv_base: float = 0.14,          # 14% base IV
-        tick_interval: float = 0.5,     # seconds between tick batches
-        spike_interval_range: tuple[float, float] = (180.0, 480.0),
-    ) -> None:
-        super().__init__(queue)
-        self._spot = spot_start
-        self._iv = iv_base
-        self._tick_interval = tick_interval
-        self._spike_low, self._spike_high = spike_interval_range
-
-        # Derived strikes (recalculated when spot drifts significantly)
-        self._atm_strike = self._round_to_50(spot_start)
-        self._otm_call_strike = self._atm_strike + 200
-        self._otm_put_strike  = self._atm_strike - 200
-
-    async def run(self) -> None:
-        self._running = True
-        next_spike = time.monotonic() + random.uniform(self._spike_low, self._spike_high)
-
-        while self._running:
-            ts = time.time()
-            mono = time.monotonic()
-
-            # --- IV spike event ---
-            in_spike = mono >= next_spike and mono < next_spike + 30.0
-            if mono > next_spike + 30.0:
-                next_spike = mono + random.uniform(self._spike_low, self._spike_high)
-                logger.debug("Mock: IV spike ended, next in %.0fs",
-                             next_spike - mono)
-
-            iv_now = self._iv * (3.5 if in_spike else 1.0)
-
-            # --- Brownian spot move ---
-            dt = self._tick_interval
-            drift = 0.0
-            vol = 0.12  # annualised spot vol
-            dW = random.gauss(0, math.sqrt(dt / (252 * 6.5 * 3600)))
-            self._spot *= math.exp((drift - 0.5 * vol ** 2) * dt / (252 * 6.5 * 3600) + vol * dW)
-            self._spot = round(self._spot, 2)
-
-            # Recalibrate ATM strike if spot drifts > 100 pts
-            if abs(self._spot - self._atm_strike) > 100:
-                self._atm_strike = self._round_to_50(self._spot)
-                self._otm_call_strike = self._atm_strike + 200
-                self._otm_put_strike  = self._atm_strike - 200
-
-            T = max((15.5 - (ts % 86400) / 3600) / 252, 1e-4)   # rough time to expiry
-
-            atm_call_price = self._bs_price(self._spot, self._atm_strike,    T, iv_now, True)
-            atm_put_price  = self._bs_price(self._spot, self._atm_strike,    T, iv_now, False)
-            otm_call_price = self._bs_price(self._spot, self._otm_call_strike, T, iv_now, True)
-            otm_put_price  = self._bs_price(self._spot, self._otm_put_strike,  T, iv_now, False)
-
-            ticks = [
-                Tick(self.SPOT,     "0",  self._spot,       ts),
-                Tick(self.ATM_CALL, "1",  round(atm_call_price, 2), ts),
-                Tick(self.ATM_PUT,  "2",  round(atm_put_price,  2), ts),
-                Tick(self.OTM_CALL, "3",  round(otm_call_price, 2), ts),
-                Tick(self.OTM_PUT,  "4",  round(otm_put_price,  2), ts),
-            ]
-            for t in ticks:
-                await self._emit(t)
-
-            await asyncio.sleep(self._tick_interval)
-
-    # ------------------------------------------------------------------
-    # Black-Scholes helpers (fast, no external calls)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _bs_price(S: float, K: float, T: float, sigma: float, is_call: bool) -> float:
-        if T <= 0:
-            return max(S - K, 0.0) if is_call else max(K - S, 0.0)
-        r = 0.065  # risk-free rate (approx RBI repo)
-        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        if is_call:
-            return max(S * MockTickFeed._norm_cdf(d1) - K * math.exp(-r * T) * MockTickFeed._norm_cdf(d2), 0.05)
-        else:
-            return max(K * math.exp(-r * T) * MockTickFeed._norm_cdf(-d2) - S * MockTickFeed._norm_cdf(-d1), 0.05)
-
-    @staticmethod
-    def _norm_cdf(x: float) -> float:
-        # Abramowitz & Stegun approximation (error < 7.5e-8)
-        t = 1.0 / (1.0 + 0.2316419 * abs(x))
-        poly = t * (0.319381530
-                    + t * (-0.356563782
-                           + t * (1.781477937
-                                  + t * (-1.821255978
-                                         + t * 1.330274429))))
-        p = 1.0 - (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * x * x) * poly
-        return p if x >= 0 else 1.0 - p
-
-    @staticmethod
-    def _round_to_50(price: float) -> float:
-        return round(price / 50) * 50
+        if not ltp or security_id not in sym_map:
+            return None
+        return Tick(
+            symbol=sym_map[security_id],
+            security_id=security_id,
+            ltp=float(ltp),
+            timestamp=time.time(),
+        )

@@ -33,7 +33,8 @@ from core.database import Database
 from core.execution import ExecutionConfig, ExecutionEngine, ExitReason
 from core.instruments import InstrumentManager
 from core.signal import SignalConfig, SignalEngine, SignalEvent, Tick
-from core.ws_client import DhanWSClient, MockTickFeed, TickProvider
+from core.timeutil import is_weekday_ist, ist_minutes_now
+from core.ws_client import DhanWSClient, TickProvider
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,8 @@ class AppState:
     last_z_score: float | None = None
     last_ratio: float | None = None
     z_sample_count: int = 0
+    market_bias: str = "UNKNOWN"
+    spot_delta_5m: float | None = None
     capital: float = 0.0
     daily_pnl: float = 0.0
     daily_pnl_pct: float = 0.0
@@ -124,6 +127,7 @@ class Engine:
             zscore_threshold=sig_cfg["zscore_threshold"],
             zscore_lookback_minutes=sig_cfg["zscore_lookback_minutes"],
             min_history_samples=sig_cfg["min_history_samples"],
+            bias_window_seconds=sig_cfg.get("bias_window_seconds", 60.0),
         ))
 
         exc_cfg = self._cfg["execution"]
@@ -139,6 +143,10 @@ class Engine:
             force_close_time=exc_cfg["force_close_time"],
             daily_drawdown_kill_pct=exc_cfg["daily_drawdown_kill_pct"],
             lot_size=self._cfg["instrument"]["lot_size"],
+            slippage_rupees=exc_cfg.get("slippage_rupees", 2.0),
+            scale_by_zscore=exc_cfg.get("scale_by_zscore", True),
+            scale_zscore_per_lot=exc_cfg.get("scale_zscore_per_lot", 1.5),
+            min_hold_minutes=exc_cfg.get("min_hold_minutes", 3.0),
         ))
 
         dhan_cfg = self._cfg["dhan"]
@@ -147,14 +155,15 @@ class Engine:
             recalibration_interval_minutes=sig_cfg["recalibration_interval_minutes"],
             target_delta_min=sig_cfg["target_delta_min"],
             target_delta_max=sig_cfg["target_delta_max"],
-            mock_mode=dhan_cfg.get("mock_mode", True),
             dhan_client_id=dhan_cfg.get("client_id", ""),
             dhan_access_token=dhan_cfg.get("access_token", ""),
             instrument_name=self._cfg["instrument"]["default"],
+            on_instruments_changed=lambda: self.state.reconnect_event.set(),
         )
 
         self._warmup_seconds: float = self._cfg["ws"]["warmup_seconds"]
         self._tick_csv_path: Path | None = None
+        self._stale_tick_timeout: float = self._cfg["ws"].get("stale_tick_timeout_seconds", 15.0)
 
     # ------------------------------------------------------------------
     # Entry point
@@ -190,6 +199,7 @@ class Engine:
 
     async def _tick_loop(self) -> None:
         while True:
+            self._signal_engine.reset()
             provider = self._make_provider()
             warmup_end = time.monotonic() + self._warmup_seconds
 
@@ -221,6 +231,7 @@ class Engine:
             await asyncio.sleep(delay)
 
     async def _process_ticks(self, provider_task: asyncio.Task, warmup_end: float) -> None:
+        last_tick_mono = time.monotonic()
         while not provider_task.done():
             # Token update triggers immediate reconnect with new credentials
             if self.state.reconnect_event.is_set():
@@ -233,25 +244,54 @@ class Engine:
                     self._tick_queue.get(), timeout=1.0
                 )
             except asyncio.TimeoutError:
+                # Advance through warmup on a timer even if no ticks arrive
+                if self.state.engine_state == EngineState.WARMING_UP:
+                    remaining = warmup_end - time.monotonic()
+                    self.state.warmup_remaining_seconds = max(0.0, remaining)
+                    if remaining <= 0:
+                        self.state.engine_state = EngineState.ACTIVE
+                        self._execution_engine.reset_day()
+                        logger.info("Warmup complete (no ticks yet) — engine ACTIVE")
+                # Stale-tick detector: TCP may stay open while the feed silently
+                # stalls.  Force a reconnect if no tick arrived in N seconds
+                # during market hours.
+                silent_for = time.monotonic() - last_tick_mono
+                if (silent_for > self._stale_tick_timeout
+                        and self._in_market_hours()
+                        and self.state.engine_state != EngineState.WARMING_UP):
+                    logger.warning(
+                        "No ticks for %.0fs during market hours — forcing reconnect",
+                        silent_for,
+                    )
+                    return
                 continue
+
+            last_tick_mono = time.monotonic()
 
             self._log_tick_csv(tick)
             self._update_state_prices(tick)
 
-            # Advance to ACTIVE after warmup
-            if (self.state.engine_state == EngineState.WARMING_UP
-                    and time.monotonic() >= warmup_end):
-                self.state.engine_state = EngineState.ACTIVE
-                self._execution_engine.reset_day()
-                logger.info("Warmup complete — engine ACTIVE")
+            # Feed signal engine every tick so Z-score baseline builds during warmup
+            signal_candidate: SignalEvent | None = self._signal_engine.on_tick(tick)
+            self.state.z_sample_count = self._signal_engine.z_score_sample_count()
+            self.state.last_z_score = self._signal_engine.current_z_score()
+            bias, delta_5m = self._signal_engine.market_bias()
+            self.state.market_bias   = bias
+            self.state.spot_delta_5m = delta_5m
+
+            # Advance to ACTIVE after warmup; track countdown for UI
+            if self.state.engine_state == EngineState.WARMING_UP:
+                remaining = warmup_end - time.monotonic()
+                self.state.warmup_remaining_seconds = max(0.0, remaining)
+                if remaining <= 0:
+                    self.state.engine_state = EngineState.ACTIVE
+                    self._execution_engine.reset_day()
+                    logger.info("Warmup complete — engine ACTIVE")
 
             if self.state.engine_state not in (EngineState.ACTIVE,):
                 continue
 
-            # Feed signal engine
-            signal: SignalEvent | None = self._signal_engine.on_tick(tick)
-            self.state.last_z_score = self._signal_engine._zscore.zscore(0) if False else None
-            self.state.z_sample_count = self._signal_engine.z_score_sample_count()
+            signal = signal_candidate
 
             # Execution: price update on open trade
             closed = self._execution_engine.on_tick(tick.symbol, tick.ltp)
@@ -274,9 +314,24 @@ class Engine:
             if signal:
                 await self._on_signal(signal)
 
-            # Divergence collapse: Z-score drops back below threshold
-            if self._execution_engine.open_trade and signal is None:
-                pass  # divergence collapse handled separately below
+            # Divergence collapse: Z-score has dropped back below the threshold
+            # while a trade is still open → exit the position.
+            # Guarded by min_hold_minutes to prevent immediate exit when the
+            # Z-score dips briefly at the threshold boundary right after entry.
+            open_trade = self._execution_engine.open_trade
+            if open_trade and signal is None:
+                current_z = self._signal_engine.current_z_score()
+                threshold = self._signal_engine.config.zscore_threshold
+                atm_ltp_now = self.state.atm_ltp
+                min_hold = self._execution_engine.config.min_hold_minutes * 60.0
+                held_long_enough = (time.time() - open_trade.opened_at) >= min_hold
+                if (held_long_enough
+                        and current_z is not None
+                        and current_z < threshold
+                        and atm_ltp_now > 0):
+                    closed = self._execution_engine.on_divergence_collapse(atm_ltp_now)
+                    if closed:
+                        await self._on_trade_close(closed)
 
             self._sync_state()
 
@@ -301,7 +356,21 @@ class Engine:
         if atm_ltp <= 0:
             return
 
-        trade = self._execution_engine.try_open(signal, atm_ltp, signal.atm_symbol)
+        # Bias-confirmation gate: only act when the 1-min option-flow bias
+        # agrees with the Z-score direction. BULLISH bias + CALL signal, or
+        # BEARISH bias + PUT signal. SIDEWAYS / UNKNOWN / opposite-bias signals
+        # are recorded but not traded.
+        bias = self.state.market_bias
+        aligned = (
+            (bias == "BULLISH" and signal.direction == "CALL")
+            or (bias == "BEARISH" and signal.direction == "PUT")
+        )
+        if aligned:
+            trade = self._execution_engine.try_open(signal, atm_ltp, signal.atm_symbol)
+        else:
+            trade = None
+            logger.info("Signal skipped — bias=%s does not confirm %s direction",
+                        bias, signal.direction)
         acted_on = trade is not None
 
         await self._db.insert_signal({
@@ -353,8 +422,26 @@ class Engine:
         imap = self._instrument_manager.current_map()
         if imap is None:
             return
+        # Feed every option tick into the LTP cache for IV computation
+        self._instrument_manager.update_option_ltp(tick.symbol, tick.ltp)
         if tick.symbol == imap.spot_symbol:
             self.state.spot_ltp = tick.ltp
+            # Live re-selection: if ATM/OTM has shifted within the grid, swap
+            # the SignalEngine's active leg pointers — no WS reconnect needed.
+            if self._instrument_manager.update_active_for_spot(tick.ltp):
+                self._signal_engine.set_instrument_map(
+                    spot_symbol     = imap.spot_symbol,
+                    atm_call_symbol = imap.atm_call.symbol,
+                    atm_put_symbol  = imap.atm_put.symbol,
+                    otm_call_symbol = imap.otm_call.symbol,
+                    otm_put_symbol  = imap.otm_put.symbol,
+                    bias_otm_call_symbols = [s.symbol for s in imap.near_otm_calls],
+                    bias_otm_put_symbols  = [s.symbol for s in imap.near_otm_puts],
+                )
+                logger.debug(
+                    "Active legs rolled — ATM=%.0f  OTM call=%s  OTM put=%s",
+                    imap.atm_strike, imap.otm_call.symbol, imap.otm_put.symbol,
+                )
         elif tick.symbol == imap.atm_call.symbol:
             self.state.atm_ltp = tick.ltp
         elif tick.symbol == imap.otm_call.symbol:
@@ -376,10 +463,16 @@ class Engine:
                 "engine_state":   self.state.engine_state.value,
                 "spot_ltp":       self.state.spot_ltp,
                 "atm_ltp":        self.state.atm_ltp,
+                "otm_call_ltp":   self.state.otm_call_ltp,
+                "otm_put_ltp":    self.state.otm_put_ltp,
                 "capital":        self.state.capital,
                 "daily_pnl":      self.state.daily_pnl,
                 "daily_pnl_pct":  self.state.daily_pnl_pct,
                 "z_sample_count": self.state.z_sample_count,
+                "market_bias":    self.state.market_bias,
+                "spot_delta_5m":  self.state.spot_delta_5m,
+                "last_z_score":   self.state.last_z_score,
+                "last_ratio":     self.state.last_ratio,
             })
             await asyncio.sleep(2.0)
 
@@ -387,15 +480,21 @@ class Engine:
     # Tick provider factory
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _in_market_hours() -> bool:
+        """NSE cash/derivatives session: 09:15–15:30 IST, Mon–Fri."""
+        if not is_weekday_ist():
+            return False
+        m = ist_minutes_now()
+        return (9 * 60 + 15) <= m <= (15 * 60 + 30)
+
     def _make_provider(self) -> TickProvider:
         dhan = self._cfg["dhan"]
-        if dhan.get("mock_mode", True):
-            return MockTickFeed(queue=self._tick_queue)
         return DhanWSClient(
             queue=self._tick_queue,
-            client_id=dhan["client_id"],
-            access_token=dhan["access_token"],
-            instruments=[],   # populated by InstrumentManager in live mode
+            client_id=dhan.get("client_id", ""),
+            access_token=dhan.get("access_token", ""),
+            instrument_provider=self._instrument_manager.get_dhan_instruments,
             reconnect_delay=self._cfg["ws"]["reconnect_delay_seconds"],
         )
 

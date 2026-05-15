@@ -1,8 +1,7 @@
 dhan:
-  client_id: "${DHAN_CLIENT_ID}"
+  client_id: "1102982629"
   access_token: "${DHAN_ACCESS_TOKEN}"
   ws_url: "wss://api-feed.dhan.co"
-  mock_mode: true   # set false in prod with real credentials
 
 instrument:
   default: "NIFTY"
@@ -17,24 +16,30 @@ signal:
   min_history_samples: 30     # minimum samples before Z-score is trusted
   target_delta_min: 0.10      # OTM strike delta lower bound
   target_delta_max: 0.15      # OTM strike delta upper bound
-  recalibration_interval_minutes: 30  # how often to re-anchor ATM/OTM strikes
+  recalibration_interval_minutes: 1    # how often to re-anchor ATM/OTM strikes
+  bias_window_seconds: 60              # 1-min window for OTM vs ATM option-flow bias
 
 execution:
   paper_trading: true
-  virtual_capital: 1000000    # ₹10 lakh
+  virtual_capital: 100000     # ₹1 lakh
   max_position_pct: 0.20      # 20% of capital per trade
   stop_loss_pct: 0.30         # exit if premium drops 30% from entry
   trailing_stop_activation_pct: 0.20  # activate trailing stop at +20% profit
   trailing_stop_pct: 0.15     # trail 15% below running peak
   cooldown_minutes: 15        # lock after any trade close
+  min_hold_minutes: 3         # divergence exit blocked for this long after open
   morning_filter_start: "09:15"
   morning_filter_end: "09:30"
   force_close_time: "15:15"
   daily_drawdown_kill_pct: 0.40  # halt if cumulative daily loss >= 40%
+  slippage_rupees: 2.0        # per-share fill cost on entry & exit (bid-ask)
+  scale_by_zscore: true       # size position by signal strength
+  scale_zscore_per_lot: 1.5   # 1 lot per 1.5σ (Z=2→1 lot, Z=4→2 lots, Z=6→4 lots)
 
 ws:
   warmup_seconds: 300         # 5-min blackout after reconnect
   reconnect_delay_seconds: 5
+  stale_tick_timeout_seconds: 15  # force reconnect if feed silent this long during market hours
 
 api:
   host: "0.0.0.0"

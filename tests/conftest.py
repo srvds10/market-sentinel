@@ -33,9 +33,11 @@ def exec_engine():
         trailing_stop_pct=0.15,
         cooldown_minutes=0.0,    # disabled for fast tests
         morning_filter_start="00:00",
-        morning_filter_end="23:59",
-        force_close_time="23:59",
+        morning_filter_end="00:00",   # no opening blackout — trading allowed all day
+        force_close_time="23:59",     # never force-close in tests
         daily_drawdown_kill_pct=0.40,
         lot_size=50,
+        slippage_rupees=0.0,     # tests assume frictionless fills
+        scale_by_zscore=False,   # tests assume uncapped sizing
     )
     return ExecutionEngine(cfg)

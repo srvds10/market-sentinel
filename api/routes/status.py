@@ -20,9 +20,11 @@ async def get_status(request: Request) -> dict:
                 "otm_call_symbol":   raw.otm_call.symbol,
                 "otm_call_strike":   raw.otm_call.strike_price,
                 "otm_call_delta":    raw.otm_call.delta,
+                "otm_call_iv":       round(raw.otm_call.iv * 100, 2),
                 "otm_put_symbol":    raw.otm_put.symbol,
                 "otm_put_strike":    raw.otm_put.strike_price,
                 "otm_put_delta":     raw.otm_put.delta,
+                "otm_put_iv":        round(raw.otm_put.iv * 100, 2),
             }
 
     return {
@@ -34,6 +36,8 @@ async def get_status(request: Request) -> dict:
         "last_z_score":       state.last_z_score,
         "last_ratio":         state.last_ratio,
         "z_sample_count":     state.z_sample_count,
+        "market_bias":        state.market_bias,
+        "spot_delta_5m":      state.spot_delta_5m,
         "capital":            state.capital,
         "daily_pnl":          state.daily_pnl,
         "daily_pnl_pct":      state.daily_pnl_pct,
@@ -42,6 +46,7 @@ async def get_status(request: Request) -> dict:
         "warmup_remaining":   state.warmup_remaining_seconds,
         "reconnect_count":    state.reconnect_count,
         "instrument_map":     imap,
+        "started_at":         state.started_at,
         "server_time":        time.time(),
         "last_heartbeat":     state.last_heartbeat,
     }

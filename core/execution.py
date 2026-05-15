@@ -4,11 +4,11 @@ Paper-trade execution engine.
 State machine per trade:
   OPEN  →  CLOSED (exit reason: STOP_LOSS | TRAILING_STOP | DIVERGENCE | TIME_STOP | KILL_SWITCH)
 
-Guards:
-  - Morning filter: only execute between 09:15 and 09:30
+Guards (all time checks evaluated in IST, not server-local time):
+  - Opening blackout: no new trades during 09:15-morning_filter_end
+  - Force-close cutoff: no new trades after force_close_time; open trades get TIME_STOP
   - 15-minute cooldown after any trade close
   - Daily drawdown kill switch: halt if cumulative daily loss >= 40% of start capital
-  - Force-close all open trades at 15:15
   - Max 20% of virtual capital per trade
 """
 
@@ -23,6 +23,7 @@ from enum import Enum
 from typing import Optional
 
 from core.signal import SignalEvent
+from core.timeutil import hhmm_to_minutes, ist_minutes_now
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +64,11 @@ class PaperTrade:
     qty: int
     capital_at_risk: float  # ₹ allocated (entry_price * qty * lot_size)
     z_score_entry: float
-    stop_loss: float        # absolute price floor
-    trailing_high: float    # running peak (for trailing stop)
-    trailing_active: bool   # True once profit >= activation threshold
+    stop_loss: float                    # absolute price floor
+    trailing_high: float                # running peak (for trailing stop)
+    trailing_active: bool               # True once profit >= activation threshold
+    trailing_stop_pct: float = 0.15     # snapshotted from config at open time
+    trailing_activation_pct: float = 0.20
     closed_at: float | None = None
     exit_price: float | None = None
     exit_reason: ExitReason | None = None
@@ -93,17 +96,26 @@ class PaperTrade:
 
 @dataclass
 class ExecutionConfig:
-    virtual_capital: float = 1_000_000.0
+    virtual_capital: float = 100_000.0
     max_position_pct: float = 0.20
     stop_loss_pct: float = 0.30
     trailing_stop_activation_pct: float = 0.20
     trailing_stop_pct: float = 0.15
     cooldown_minutes: float = 15.0
+    min_hold_minutes: float = 3.0   # divergence exit blocked for this long after open
     morning_filter_start: str = "09:15"
     morning_filter_end: str = "09:30"
     force_close_time: str = "15:15"
     daily_drawdown_kill_pct: float = 0.40
     lot_size: int = 50
+    # Slippage applied per-share on both entry and exit (₹).  A round trip on
+    # 1 lot of an OTM NIFTY weekly costs 2 * slippage_rupees * lot_size.
+    slippage_rupees: float = 2.0
+    # Scale position size by signal strength.  When True, qty = min(max_lots,
+    # ceil(z_score * scale_zscore_per_lot)).  Set scale_zscore_per_lot high to
+    # disable.
+    scale_by_zscore: bool = True
+    scale_zscore_per_lot: float = 1.5    # 1 lot per 1.5σ of signal strength
 
 
 # ---------------------------------------------------------------------------
@@ -176,24 +188,28 @@ class ExecutionEngine:
             return EngineBlock.KILL_SWITCH
         if self._open_trade is not None:
             return EngineBlock.POSITION_OPEN
-        if not self._in_morning_window():
+        if not self._in_trading_window():
             return EngineBlock.MORNING_FILTER
         cooldown_seconds = self.config.cooldown_minutes * 60.0
         if time.time() - self._last_close_ts < cooldown_seconds:
             return EngineBlock.COOLDOWN
         return EngineBlock.NONE
 
-    def _in_morning_window(self) -> bool:
-        now = datetime.now()
-        start_h, start_m = map(int, self.config.morning_filter_start.split(":"))
-        end_h,   end_m   = map(int, self.config.morning_filter_end.split(":"))
-        t = now.hour * 60 + now.minute
-        return (start_h * 60 + start_m) <= t <= (end_h * 60 + end_m)
+    def _in_trading_window(self) -> bool:
+        """True only after the opening blackout ends and before force-close.
+
+        Opening blackout = config.morning_filter_start ... morning_filter_end
+        (typically 09:15–09:30, when opening-auction noise is highest).
+        After morning_filter_end and strictly before force_close_time, new
+        trades may open.  All checks are in IST.
+        """
+        now_min   = ist_minutes_now()
+        blackout_end = hhmm_to_minutes(self.config.morning_filter_end)
+        cutoff       = hhmm_to_minutes(self.config.force_close_time)
+        return blackout_end <= now_min < cutoff
 
     def _past_force_close(self) -> bool:
-        now = datetime.now()
-        h, m = map(int, self.config.force_close_time.split(":"))
-        return now.hour * 60 + now.minute >= h * 60 + m
+        return ist_minutes_now() >= hhmm_to_minutes(self.config.force_close_time)
 
     # ------------------------------------------------------------------
     # Open
@@ -210,29 +226,41 @@ class ExecutionEngine:
             logger.debug("Open blocked: %s", block.value)
             return None
 
-        capital_at_risk = self._capital * self.config.max_position_pct
-        qty = max(1, int(capital_at_risk / (atm_ltp * self.config.lot_size)))
-        actual_risk = qty * atm_ltp * self.config.lot_size
+        # Realistic fill: we buy at ask, so entry price = LTP + slippage
+        entry_price = atm_ltp + self.config.slippage_rupees
 
-        stop_loss = atm_ltp * (1.0 - self.config.stop_loss_pct)
+        capital_at_risk = self._capital * self.config.max_position_pct
+        max_lots = max(1, int(capital_at_risk / (entry_price * self.config.lot_size)))
+
+        if self.config.scale_by_zscore and self.config.scale_zscore_per_lot > 0:
+            scaled = max(1, int(signal.z_score / self.config.scale_zscore_per_lot))
+            qty = min(max_lots, scaled)
+        else:
+            qty = max_lots
+
+        actual_risk = qty * entry_price * self.config.lot_size
+        stop_loss = entry_price * (1.0 - self.config.stop_loss_pct)
 
         trade = PaperTrade(
             id=str(uuid.uuid4())[:8],
             opened_at=time.time(),
             symbol=atm_symbol,
             direction=signal.direction,
-            entry_price=atm_ltp,
+            entry_price=entry_price,
             qty=qty,
             capital_at_risk=actual_risk,
             z_score_entry=signal.z_score,
             stop_loss=stop_loss,
-            trailing_high=atm_ltp,
+            trailing_high=entry_price,
             trailing_active=False,
+            trailing_stop_pct=self.config.trailing_stop_pct,
+            trailing_activation_pct=self.config.trailing_stop_activation_pct,
         )
         self._open_trade = trade
         logger.info(
-            "PAPER OPEN  %s  %s @ ₹%.2f  qty=%d  SL=₹%.2f  Z=%.2f",
-            trade.id, trade.symbol, atm_ltp, qty, stop_loss, signal.z_score,
+            "PAPER OPEN  %s  %s @ ₹%.2f (LTP %.2f + slip %.2f)  qty=%d  SL=₹%.2f  Z=%.2f",
+            trade.id, trade.symbol, entry_price, atm_ltp,
+            self.config.slippage_rupees, qty, stop_loss, signal.z_score,
         )
         return trade
 
@@ -256,7 +284,7 @@ class ExecutionEngine:
 
         # --- trailing stop check ---
         if trade.trailing_active:
-            trail_floor = trade.trailing_high * (1.0 - self.config.trailing_stop_pct)
+            trail_floor = trade.trailing_high * (1.0 - trade.trailing_stop_pct)
             if ltp <= trail_floor:
                 return self._close(ltp, ExitReason.TRAILING_STOP)
 
@@ -268,7 +296,7 @@ class ExecutionEngine:
 
     def _trailing_activated(self, trade: PaperTrade, ltp: float) -> bool:
         profit_pct = (ltp - trade.entry_price) / trade.entry_price
-        return profit_pct >= self.config.trailing_stop_activation_pct
+        return profit_pct >= trade.trailing_activation_pct
 
     # ------------------------------------------------------------------
     # Named exit triggers
@@ -298,9 +326,12 @@ class ExecutionEngine:
     # Internal close
     # ------------------------------------------------------------------
 
-    def _close(self, exit_price: float, reason: ExitReason) -> PaperTrade:
+    def _close(self, exit_ltp: float, reason: ExitReason) -> PaperTrade:
         trade = self._open_trade
         assert trade is not None
+
+        # Realistic exit: we sell at bid, so realised price = LTP − slippage
+        exit_price = max(0.0, exit_ltp - self.config.slippage_rupees)
 
         pnl = (exit_price - trade.entry_price) * trade.qty * self.config.lot_size
         pnl_pct = pnl / trade.capital_at_risk if trade.capital_at_risk else 0.0
@@ -335,5 +366,7 @@ class ExecutionEngine:
     def _should_kill(self) -> bool:
         if self._kill_active:
             return True
+        if self._day_start_capital <= 0:
+            return False
         loss_pct = (self._day_start_capital - self._capital) / self._day_start_capital
         return loss_pct >= self.config.daily_drawdown_kill_pct

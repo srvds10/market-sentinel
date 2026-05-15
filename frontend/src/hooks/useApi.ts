@@ -66,3 +66,27 @@ export async function updateToken(access_token: string) {
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
+
+export async function downloadLogs() {
+  const res = await fetch('/api/logs/download')
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'market-sentinel.log'
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+export async function clearLogs() {
+  const res = await fetch('/api/logs/clear', { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function fetchLogSize(): Promise<{ bytes: number; exists: boolean }> {
+  const res = await fetch('/api/logs/size')
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}

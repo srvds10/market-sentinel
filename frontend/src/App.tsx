@@ -3,6 +3,7 @@ import clsx from 'clsx'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 
 import { ZScoreGauge } from './components/ZScoreGauge'
+import { MarketBias } from './components/MarketBias'
 import { SignalFeed } from './components/SignalFeed'
 import { PositionTracker } from './components/PositionTracker'
 import { TradeBlotter } from './components/TradeBlotter'
@@ -61,33 +62,43 @@ export default function App() {
   const uptime = useUptime(serverStartedAt)
 
   const onMessage = useCallback((msg: WSMessage) => {
+    if (msg.type === 'ping') return
     if (msg.type === 'status') {
       setStatus(prev => ({ ...prev, ...msg }))
       if (msg.spot_ltp) {
         const t = Date.now()
         setPriceHistory(prev =>
-          [...prev, { t, spot: msg.spot_ltp!, z: msg.last_z_score ?? 0 }].slice(-120)
+          [...prev, { t, spot: msg.spot_ltp!, z: msg.last_z_score ?? 0 }].slice(-900)
         )
         setPnlHistory(prev =>
-          [...prev, { t, pnl: msg.daily_pnl ?? 0 }].slice(-120)
+          [...prev, { t, pnl: msg.daily_pnl ?? 0 }].slice(-900)
         )
       }
     } else if (msg.type === 'signal') {
       setLiveSignals(prev => [msg as Signal, ...prev].slice(0, 30))
       refreshSignals()
-    } else if (msg.type === 'trade_open' || msg.type === 'trade_close') {
+    } else if (msg.type === 'trade_open') {
+      const { type: _t, ...trade } = msg
+      setStatus(prev => ({ ...prev, open_trade: trade }))
+      refreshTrades()
+    } else if (msg.type === 'trade_close') {
+      setStatus(prev => ({ ...prev, open_trade: null }))
       refreshTrades()
     }
   }, [refreshSignals, refreshTrades])
 
   const connected = useWebSocket(WS_URL, onMessage)
 
-  // Fetch server uptime once on connect
+  // On every (re)connect: pre-populate all status fields from the HTTP snapshot
+  // so the UI shows real engine state immediately instead of blanks for 2s.
   useEffect(() => {
     if (connected) {
       fetch('/api/status')
         .then(r => r.json())
-        .then(d => { if (d.last_heartbeat) setServerStartedAt(d.server_time - (d.last_heartbeat - d.server_time + 1)) })
+        .then((d: Partial<StatusPayload> & { started_at?: number }) => {
+          if (d.started_at) setServerStartedAt(d.started_at)
+          setStatus(prev => ({ ...prev, ...d }))
+        })
         .catch(() => {})
     }
   }, [connected])
@@ -196,6 +207,12 @@ export default function App() {
               </div>
             </div>
           </div>
+
+          {/* Market bias */}
+          <MarketBias
+            bias={status.market_bias ?? 'UNKNOWN'}
+            triggerDelta={status.spot_delta_5m ?? null}
+          />
 
           {/* Signal feed */}
           <div className="rounded-lg border border-border bg-panel p-3 flex-1 min-h-0 overflow-hidden">

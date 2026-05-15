@@ -11,11 +11,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
+
+PING_INTERVAL = 20.0  # seconds between server-side pings
 
 
 class ConnectionManager:
@@ -49,13 +50,29 @@ manager = ConnectionManager()
 async def ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     q = manager.subscribe()
-    try:
+
+    async def sender() -> None:
         while True:
             msg = await q.get()
             await websocket.send_text(json.dumps(msg, default=str))
+
+    async def pinger() -> None:
+        """Send a ping every 20 s to keep the connection alive through proxies."""
+        while True:
+            await asyncio.sleep(PING_INTERVAL)
+            await websocket.send_text(json.dumps({"type": "ping"}))
+
+    sender_task = asyncio.create_task(sender())
+    pinger_task = asyncio.create_task(pinger())
+    try:
+        # Keep reading so we detect disconnects promptly
+        while True:
+            await websocket.receive_text()
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
+        sender_task.cancel()
+        pinger_task.cancel()
         manager.unsubscribe(q)
 
 
