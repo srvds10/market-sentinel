@@ -371,12 +371,16 @@ class SignalEngine:
         if any(d is None for d in [d_atm_c, d_atm_p, d_otm_c, d_otm_p]):
             return "UNKNOWN", None
 
-        # BULLISH: OTM call rising faster than ATM call
-        if d_otm_c > 0 and d_otm_c > d_atm_c:  # type: ignore[operator]
+        # BULLISH: OTM call rising faster than ATM call, ATM call itself
+        # rising, AND ATM put falling — confirms a directional move rather
+        # than a pure IV expansion (which would lift both ATM legs together).
+        if (d_otm_c > 0 and d_otm_c > d_atm_c  # type: ignore[operator]
+                and d_atm_c > 0 and d_atm_p < 0):  # type: ignore[operator]
             return "BULLISH", round(d_otm_c, 2)
 
-        # BEARISH: OTM put rising faster than ATM put
-        if d_otm_p > 0 and d_otm_p > d_atm_p:  # type: ignore[operator]
+        # BEARISH: mirror condition on the put side.
+        if (d_otm_p > 0 and d_otm_p > d_atm_p  # type: ignore[operator]
+                and d_atm_p > 0 and d_atm_c < 0):  # type: ignore[operator]
             return "BEARISH", round(d_otm_p, 2)
 
         # SIDEWAYS: both OTM options declining
