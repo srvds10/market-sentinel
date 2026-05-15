@@ -102,6 +102,7 @@ class ExecutionConfig:
     trailing_stop_activation_pct: float = 0.20
     trailing_stop_pct: float = 0.15
     cooldown_minutes: float = 15.0
+    min_hold_minutes: float = 3.0   # divergence exit blocked for this long after open
     morning_filter_start: str = "09:15"
     morning_filter_end: str = "09:30"
     force_close_time: str = "15:15"

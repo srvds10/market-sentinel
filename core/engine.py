@@ -146,6 +146,7 @@ class Engine:
             slippage_rupees=exc_cfg.get("slippage_rupees", 2.0),
             scale_by_zscore=exc_cfg.get("scale_by_zscore", True),
             scale_zscore_per_lot=exc_cfg.get("scale_zscore_per_lot", 1.5),
+            min_hold_minutes=exc_cfg.get("min_hold_minutes", 3.0),
         ))
 
         dhan_cfg = self._cfg["dhan"]
@@ -315,11 +316,17 @@ class Engine:
 
             # Divergence collapse: Z-score has dropped back below the threshold
             # while a trade is still open → exit the position.
-            if self._execution_engine.open_trade and signal is None:
+            # Guarded by min_hold_minutes to prevent immediate exit when the
+            # Z-score dips briefly at the threshold boundary right after entry.
+            open_trade = self._execution_engine.open_trade
+            if open_trade and signal is None:
                 current_z = self._signal_engine.current_z_score()
                 threshold = self._signal_engine.config.zscore_threshold
                 atm_ltp_now = self.state.atm_ltp
-                if (current_z is not None
+                min_hold = self._execution_engine.config.min_hold_minutes * 60.0
+                held_long_enough = (time.time() - open_trade.opened_at) >= min_hold
+                if (held_long_enough
+                        and current_z is not None
                         and current_z < threshold
                         and atm_ltp_now > 0):
                     closed = self._execution_engine.on_divergence_collapse(atm_ltp_now)
@@ -442,6 +449,8 @@ class Engine:
                 "engine_state":   self.state.engine_state.value,
                 "spot_ltp":       self.state.spot_ltp,
                 "atm_ltp":        self.state.atm_ltp,
+                "otm_call_ltp":   self.state.otm_call_ltp,
+                "otm_put_ltp":    self.state.otm_put_ltp,
                 "capital":        self.state.capital,
                 "daily_pnl":      self.state.daily_pnl,
                 "daily_pnl_pct":  self.state.daily_pnl_pct,

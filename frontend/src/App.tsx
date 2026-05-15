@@ -84,12 +84,16 @@ export default function App() {
 
   const connected = useWebSocket(WS_URL, onMessage)
 
-  // Fetch server uptime once on connect
+  // On every (re)connect: pre-populate all status fields from the HTTP snapshot
+  // so the UI shows real engine state immediately instead of blanks for 2s.
   useEffect(() => {
     if (connected) {
       fetch('/api/status')
         .then(r => r.json())
-        .then(d => { if (d.started_at) setServerStartedAt(d.started_at) })
+        .then((d: Partial<StatusPayload> & { started_at?: number }) => {
+          if (d.started_at) setServerStartedAt(d.started_at)
+          setStatus(prev => ({ ...prev, ...d }))
+        })
         .catch(() => {})
     }
   }, [connected])

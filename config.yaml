@@ -27,6 +27,7 @@ execution:
   trailing_stop_activation_pct: 0.20  # activate trailing stop at +20% profit
   trailing_stop_pct: 0.15     # trail 15% below running peak
   cooldown_minutes: 15        # lock after any trade close
+  min_hold_minutes: 3         # divergence exit blocked for this long after open
   morning_filter_start: "09:15"
   morning_filter_end: "09:30"
   force_close_time: "15:15"
