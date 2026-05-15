@@ -414,6 +414,8 @@ class Engine:
                     atm_put_symbol  = imap.atm_put.symbol,
                     otm_call_symbol = imap.otm_call.symbol,
                     otm_put_symbol  = imap.otm_put.symbol,
+                    bias_otm_call_symbols = [s.symbol for s in imap.near_otm_calls],
+                    bias_otm_put_symbols  = [s.symbol for s in imap.near_otm_puts],
                 )
                 logger.debug(
                     "Active legs rolled — ATM=%.0f  OTM call=%s  OTM put=%s",

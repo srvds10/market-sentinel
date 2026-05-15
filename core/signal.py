@@ -155,6 +155,9 @@ class SignalEngine:
         self._windows: dict[str, RollingWindow] = {}
         # Separate 1-min windows for option-flow bias (OTM vs ATM comparison)
         self._bias_windows: dict[str, RollingWindow] = {}
+        # Near-OTM symbols sampled for the bias signal (2 strikes per side)
+        self._bias_otm_call_symbols: list[str] = []
+        self._bias_otm_put_symbols:  list[str] = []
         self._last_z_score: float | None = None
 
     def reset(self) -> None:
@@ -169,6 +172,8 @@ class SignalEngine:
         )
         self._windows.clear()
         self._bias_windows.clear()
+        self._bias_otm_call_symbols = []
+        self._bias_otm_put_symbols  = []
         self._last_z_score = None
 
     # ------------------------------------------------------------------
@@ -182,12 +187,18 @@ class SignalEngine:
         atm_put_symbol: str,
         otm_call_symbol: str,
         otm_put_symbol: str,
+        bias_otm_call_symbols: list[str] | None = None,
+        bias_otm_put_symbols:  list[str] | None = None,
     ) -> None:
         self._spot_symbol = spot_symbol
         self._atm_call_symbol = atm_call_symbol
         self._atm_put_symbol = atm_put_symbol
         self._otm_call_symbol = otm_call_symbol
         self._otm_put_symbol = otm_put_symbol
+        # Fall back to the single execution-OTM if the caller didn't supply
+        # a bias-OTM list (keeps tests and legacy callers working).
+        self._bias_otm_call_symbols = list(bias_otm_call_symbols or [otm_call_symbol])
+        self._bias_otm_put_symbols  = list(bias_otm_put_symbols  or [otm_put_symbol])
 
         tracked = {
             spot_symbol, atm_call_symbol, atm_put_symbol,
@@ -198,8 +209,11 @@ class SignalEngine:
             if sym not in self._windows:
                 self._windows[sym] = RollingWindow(self.config.window_seconds)
 
-        # 1-min bias windows for the four option legs (preserve across ATM rolls)
-        for sym in {atm_call_symbol, atm_put_symbol, otm_call_symbol, otm_put_symbol}:
+        # 1-min bias windows for ATM legs + the 2 near-OTM strikes on each side
+        bias_syms = {atm_call_symbol, atm_put_symbol}
+        bias_syms.update(self._bias_otm_call_symbols)
+        bias_syms.update(self._bias_otm_put_symbols)
+        for sym in bias_syms:
             if sym and sym not in self._bias_windows:
                 self._bias_windows[sym] = RollingWindow(self.config.bias_window_seconds)
 
@@ -325,16 +339,29 @@ class SignalEngine:
         """
         bw_atm_c = self._bias_windows.get(self._atm_call_symbol)
         bw_atm_p = self._bias_windows.get(self._atm_put_symbol)
-        bw_otm_c = self._bias_windows.get(self._otm_call_symbol)
-        bw_otm_p = self._bias_windows.get(self._otm_put_symbol)
 
-        if not all([bw_atm_c, bw_atm_p, bw_otm_c, bw_otm_p]):
+        if bw_atm_c is None or bw_atm_p is None:
             return "UNKNOWN", None
 
-        d_atm_c = bw_atm_c.delta()  # type: ignore[union-attr]
-        d_atm_p = bw_atm_p.delta()  # type: ignore[union-attr]
-        d_otm_c = bw_otm_c.delta()  # type: ignore[union-attr]
-        d_otm_p = bw_otm_p.delta()  # type: ignore[union-attr]
+        d_atm_c = bw_atm_c.delta()
+        d_atm_p = bw_atm_p.delta()
+
+        # Average 1-min delta across the 2 near-OTM strikes on each side.
+        # A symbol with an unfilled window is skipped; we proceed if at least
+        # one OTM per side has data.
+        def _avg_otm_delta(symbols: list[str]) -> float | None:
+            vals = []
+            for s in symbols:
+                w = self._bias_windows.get(s)
+                if w is None:
+                    continue
+                d = w.delta()
+                if d is not None:
+                    vals.append(d)
+            return sum(vals) / len(vals) if vals else None
+
+        d_otm_c = _avg_otm_delta(self._bias_otm_call_symbols)
+        d_otm_p = _avg_otm_delta(self._bias_otm_put_symbols)
 
         if any(d is None for d in [d_atm_c, d_atm_p, d_otm_c, d_otm_p]):
             return "UNKNOWN", None

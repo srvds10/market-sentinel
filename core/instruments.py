@@ -14,7 +14,7 @@ import io
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Callable, Optional
 
@@ -77,6 +77,11 @@ class InstrumentMap:
     atm_put: OptionStrike
     otm_call: OptionStrike  # delta closest to 0.10–0.15
     otm_put: OptionStrike
+    # Near-OTM strikes for option-flow bias (ATM+1, ATM+2 on each side).
+    # Separate from the delta-picked OTM above so that the bias signal
+    # samples near-money flow even when execution uses deeper OTM.
+    near_otm_calls: list[OptionStrike] = field(default_factory=list)
+    near_otm_puts:  list[OptionStrike] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +250,8 @@ class InstrumentManager:
             atm_put_symbol  = imap.atm_put.symbol,
             otm_call_symbol = imap.otm_call.symbol,
             otm_put_symbol  = imap.otm_put.symbol,
+            bias_otm_call_symbols = [s.symbol for s in imap.near_otm_calls],
+            bias_otm_put_symbols  = [s.symbol for s in imap.near_otm_puts],
         )
         # Pre-register every grid symbol so windows accumulate history
         # before the active leg ever rolls onto them.
@@ -509,19 +516,27 @@ class InstrumentManager:
         new_otm_call = find_closest_delta_strike(otm_calls or imap.all_calls, self._target_delta)
         new_otm_put  = find_closest_delta_strike(otm_puts  or imap.all_puts,  self._target_delta)
 
+        # Two nearest OTM strikes on each side for option-flow bias signal
+        near_otm_calls = sorted(otm_calls, key=lambda s: s.strike_price)[:2]
+        near_otm_puts  = sorted(otm_puts,  key=lambda s: -s.strike_price)[:2]
+
         changed = (
             new_atm_call.security_id != imap.atm_call.security_id
             or new_atm_put.security_id  != imap.atm_put.security_id
             or new_otm_call.security_id != imap.otm_call.security_id
             or new_otm_put.security_id  != imap.otm_put.security_id
+            or [s.security_id for s in near_otm_calls] != [s.security_id for s in imap.near_otm_calls]
+            or [s.security_id for s in near_otm_puts]  != [s.security_id for s in imap.near_otm_puts]
         )
 
-        imap.atm_strike = atm_strike
-        imap.spot_ltp   = spot
-        imap.atm_call   = new_atm_call
-        imap.atm_put    = new_atm_put
-        imap.otm_call   = new_otm_call
-        imap.otm_put    = new_otm_put
+        imap.atm_strike     = atm_strike
+        imap.spot_ltp       = spot
+        imap.atm_call       = new_atm_call
+        imap.atm_put        = new_atm_put
+        imap.otm_call       = new_otm_call
+        imap.otm_put        = new_otm_put
+        imap.near_otm_calls = near_otm_calls
+        imap.near_otm_puts  = near_otm_puts
         return changed
 
     def _parse_scrip_master(self, csv_text: str) -> tuple[list[OptionStrike], list[OptionStrike]]:
