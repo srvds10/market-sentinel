@@ -153,7 +153,8 @@ class Database:
 
     async def get_signals(self, limit: int = 50) -> list[dict]:
         async with self._db.execute(
-            "SELECT * FROM signal_events ORDER BY fired_at DESC LIMIT ?",
+            "SELECT *, fired_at AS timestamp FROM signal_events "
+            "ORDER BY fired_at DESC LIMIT ?",
             (limit,),
         ) as cur:
             rows = await cur.fetchall()
