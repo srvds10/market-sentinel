@@ -356,7 +356,21 @@ class Engine:
         if atm_ltp <= 0:
             return
 
-        trade = self._execution_engine.try_open(signal, atm_ltp, signal.atm_symbol)
+        # Bias-confirmation gate: only act when the 1-min option-flow bias
+        # agrees with the Z-score direction. BULLISH bias + CALL signal, or
+        # BEARISH bias + PUT signal. SIDEWAYS / UNKNOWN / opposite-bias signals
+        # are recorded but not traded.
+        bias = self.state.market_bias
+        aligned = (
+            (bias == "BULLISH" and signal.direction == "CALL")
+            or (bias == "BEARISH" and signal.direction == "PUT")
+        )
+        if aligned:
+            trade = self._execution_engine.try_open(signal, atm_ltp, signal.atm_symbol)
+        else:
+            trade = None
+            logger.info("Signal skipped — bias=%s does not confirm %s direction",
+                        bias, signal.direction)
         acted_on = trade is not None
 
         await self._db.insert_signal({
