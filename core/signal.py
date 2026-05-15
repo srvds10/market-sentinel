@@ -161,19 +161,24 @@ class SignalEngine:
         self._last_z_score: float | None = None
 
     def reset(self) -> None:
-        """Clear all rolling windows and Z-score history.
+        """Clear rolling-window data and Z-score history after a feed gap.
 
-        Called on every WS reconnect so a gap in the feed doesn't corrupt
-        the rolling mean/stdev used to derive Z-scores.
+        Preserves the window topology (symbols, instances) so on_tick keeps
+        storing data immediately after a reconnect, even before the next
+        ATM/OTM leg roll triggers a fresh set_instrument_map call.
         """
         self._zscore = ZScoreTracker(
             lookback_minutes=self.config.zscore_lookback_minutes,
             min_samples=self.config.min_history_samples,
         )
-        self._windows.clear()
-        self._bias_windows.clear()
-        self._bias_otm_call_symbols = []
-        self._bias_otm_put_symbols  = []
+        self._windows = {
+            sym: RollingWindow(self.config.window_seconds)
+            for sym in self._windows
+        }
+        self._bias_windows = {
+            sym: RollingWindow(self.config.bias_window_seconds)
+            for sym in self._bias_windows
+        }
         self._last_z_score = None
 
     # ------------------------------------------------------------------
