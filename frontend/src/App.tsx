@@ -77,7 +77,12 @@ export default function App() {
     } else if (msg.type === 'signal') {
       setLiveSignals(prev => [msg as Signal, ...prev].slice(0, 30))
       refreshSignals()
-    } else if (msg.type === 'trade_open' || msg.type === 'trade_close') {
+    } else if (msg.type === 'trade_open') {
+      const { type: _t, ...trade } = msg
+      setStatus(prev => ({ ...prev, open_trade: trade }))
+      refreshTrades()
+    } else if (msg.type === 'trade_close') {
+      setStatus(prev => ({ ...prev, open_trade: null }))
       refreshTrades()
     }
   }, [refreshSignals, refreshTrades])
