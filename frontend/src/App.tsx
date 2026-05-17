@@ -83,9 +83,10 @@ export default function App() {
         )
       }
       // Accumulate per-leg price histories for pressure panel
+      // 15-min window at 2s heartbeat = 450 ticks
       const push = (setter: React.Dispatch<React.SetStateAction<number[]>>, val: number | undefined) => {
         if (val != null && val > 0)
-          setter(prev => [...prev, val].slice(-30))
+          setter(prev => [...prev, val].slice(-450))
       }
       push(setItmCallHist, msg.itm_call_ltp)
       push(setAtmCallHist, msg.atm_ltp)

@@ -7,9 +7,14 @@ import clsx from 'clsx'
 
 type Pressure = 'EXPANDING' | 'SQUEEZING' | 'FLAT'
 
+// Requires at least 2 min of data (60 ticks at 2s) before signalling —
+// avoids false readings on startup.  Full signal uses the complete 15-min
+// window split into first-half vs second-half averages.
+const MIN_TICKS = 60
+
 function getPressure(history: number[]): Pressure {
   const pts = history.filter(v => v > 0)
-  if (pts.length < 5) return 'FLAT'
+  if (pts.length < MIN_TICKS) return 'FLAT'
   const half = Math.floor(pts.length / 2)
   const oldAvg = pts.slice(0, half).reduce((a, b) => a + b, 0) / half
   const newAvg = pts.slice(-half).reduce((a, b) => a + b, 0) / half
