@@ -4,6 +4,7 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceL
 
 import { ZScoreGauge } from './components/ZScoreGauge'
 import { MarketBias } from './components/MarketBias'
+import { OptionPressure } from './components/OptionPressure'
 import { SignalFeed } from './components/SignalFeed'
 import { PositionTracker } from './components/PositionTracker'
 import { TradeBlotter } from './components/TradeBlotter'
@@ -56,6 +57,13 @@ export default function App() {
   const [liveSignals, setLiveSignals] = useState<Signal[]>([])
   const [tab, setTab] = useState<'blotter' | 'config'>('blotter')
   const [serverStartedAt, setServerStartedAt] = useState<number>()
+  // Rolling price histories for option-pressure panel (last 30 ticks ≈ ~1 min)
+  const [itmCallHist, setItmCallHist] = useState<number[]>([])
+  const [atmCallHist, setAtmCallHist] = useState<number[]>([])
+  const [otmCallHist, setOtmCallHist] = useState<number[]>([])
+  const [otmPutHist,  setOtmPutHist]  = useState<number[]>([])
+  const [atmPutHist,  setAtmPutHist]  = useState<number[]>([])
+  const [itmPutHist,  setItmPutHist]  = useState<number[]>([])
 
   const { trades, refresh: refreshTrades } = useTrades(100)
   const { signals, refresh: refreshSignals } = useSignals(30)
@@ -74,6 +82,17 @@ export default function App() {
           [...prev, { t, pnl: msg.daily_pnl ?? 0 }].slice(-900)
         )
       }
+      // Accumulate per-leg price histories for pressure panel
+      const push = (setter: React.Dispatch<React.SetStateAction<number[]>>, val: number | undefined) => {
+        if (val != null && val > 0)
+          setter(prev => [...prev, val].slice(-30))
+      }
+      push(setItmCallHist, msg.itm_call_ltp)
+      push(setAtmCallHist, msg.atm_ltp)
+      push(setOtmCallHist, msg.otm_call_ltp)
+      push(setOtmPutHist,  msg.otm_put_ltp)
+      push(setAtmPutHist,  msg.atm_put_ltp)
+      push(setItmPutHist,  msg.itm_put_ltp)
     } else if (msg.type === 'signal') {
       setLiveSignals(prev => [msg as Signal, ...prev].slice(0, 30))
       refreshSignals()
@@ -284,6 +303,22 @@ export default function App() {
               </div>
             )}
           </div>
+
+          {/* Option premium pressure */}
+          <OptionPressure
+            itmCallLtp={status.itm_call_ltp ?? 0}
+            atmCallLtp={status.atm_ltp       ?? 0}
+            otmCallLtp={status.otm_call_ltp  ?? 0}
+            otmPutLtp ={status.otm_put_ltp   ?? 0}
+            atmPutLtp ={status.atm_put_ltp   ?? 0}
+            itmPutLtp ={status.itm_put_ltp   ?? 0}
+            itmCallHistory={itmCallHist}
+            atmCallHistory={atmCallHist}
+            otmCallHistory={otmCallHist}
+            otmPutHistory ={otmPutHist}
+            atmPutHistory ={atmPutHist}
+            itmPutHistory ={itmPutHist}
+          />
 
           {/* Open position */}
           <PositionTracker trade={status.open_trade ?? null} atm_ltp={status.atm_ltp ?? 0} />

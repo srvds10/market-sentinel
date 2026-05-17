@@ -17,6 +17,10 @@ async def get_status(request: Request) -> dict:
         if raw:
             imap = {
                 "atm_strike":        raw.atm_strike,
+                "itm_call_symbol":   raw.itm_call.symbol if raw.itm_call else None,
+                "itm_call_strike":   raw.itm_call.strike_price if raw.itm_call else None,
+                "itm_put_symbol":    raw.itm_put.symbol if raw.itm_put else None,
+                "itm_put_strike":    raw.itm_put.strike_price if raw.itm_put else None,
                 "otm_call_symbol":   raw.otm_call.symbol,
                 "otm_call_strike":   raw.otm_call.strike_price,
                 "otm_call_delta":    raw.otm_call.delta,
@@ -31,6 +35,9 @@ async def get_status(request: Request) -> dict:
         "engine_state":       state.engine_state.value,
         "spot_ltp":           state.spot_ltp,
         "atm_ltp":            state.atm_ltp,
+        "atm_put_ltp":        state.atm_put_ltp,
+        "itm_call_ltp":       state.itm_call_ltp,
+        "itm_put_ltp":        state.itm_put_ltp,
         "otm_call_ltp":       state.otm_call_ltp,
         "otm_put_ltp":        state.otm_put_ltp,
         "last_z_score":       state.last_z_score,

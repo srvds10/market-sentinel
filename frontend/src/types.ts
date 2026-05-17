@@ -6,6 +6,9 @@ export interface StatusPayload {
   engine_state: EngineState
   spot_ltp: number
   atm_ltp: number
+  atm_put_ltp: number
+  itm_call_ltp: number
+  itm_put_ltp: number
   otm_call_ltp: number
   otm_put_ltp: number
   last_z_score: number | null
@@ -54,12 +57,18 @@ export interface Signal {
 
 export interface InstrumentMap {
   atm_strike: number
+  itm_call_symbol: string | null
+  itm_call_strike: number | null
+  itm_put_symbol: string | null
+  itm_put_strike: number | null
   otm_call_symbol: string
   otm_call_strike: number
   otm_call_delta: number
+  otm_call_iv: number
   otm_put_symbol: string
   otm_put_strike: number
   otm_put_delta: number
+  otm_put_iv: number
 }
 
 export type WSMessage =

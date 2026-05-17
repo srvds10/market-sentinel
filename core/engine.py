@@ -60,6 +60,9 @@ class AppState:
     engine_state: EngineState = EngineState.IDLE
     spot_ltp: float = 0.0
     atm_ltp: float = 0.0
+    atm_put_ltp: float = 0.0
+    itm_call_ltp: float = 0.0
+    itm_put_ltp: float = 0.0
     otm_call_ltp: float = 0.0
     otm_put_ltp: float = 0.0
     last_z_score: float | None = None
@@ -444,6 +447,12 @@ class Engine:
                 )
         elif tick.symbol == imap.atm_call.symbol:
             self.state.atm_ltp = tick.ltp
+        elif tick.symbol == imap.atm_put.symbol:
+            self.state.atm_put_ltp = tick.ltp
+        elif imap.itm_call and tick.symbol == imap.itm_call.symbol:
+            self.state.itm_call_ltp = tick.ltp
+        elif imap.itm_put and tick.symbol == imap.itm_put.symbol:
+            self.state.itm_put_ltp = tick.ltp
         elif tick.symbol == imap.otm_call.symbol:
             self.state.otm_call_ltp = tick.ltp
         elif tick.symbol == imap.otm_put.symbol:
@@ -463,6 +472,9 @@ class Engine:
                 "engine_state":   self.state.engine_state.value,
                 "spot_ltp":       self.state.spot_ltp,
                 "atm_ltp":        self.state.atm_ltp,
+                "atm_put_ltp":    self.state.atm_put_ltp,
+                "itm_call_ltp":   self.state.itm_call_ltp,
+                "itm_put_ltp":    self.state.itm_put_ltp,
                 "otm_call_ltp":   self.state.otm_call_ltp,
                 "otm_put_ltp":    self.state.otm_put_ltp,
                 "capital":        self.state.capital,

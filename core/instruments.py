@@ -82,6 +82,9 @@ class InstrumentMap:
     # samples near-money flow even when execution uses deeper OTM.
     near_otm_calls: list[OptionStrike] = field(default_factory=list)
     near_otm_puts:  list[OptionStrike] = field(default_factory=list)
+    # First ITM strike on each side (one step inside ATM) for premium-pressure display.
+    itm_call: Optional[OptionStrike] = None
+    itm_put:  Optional[OptionStrike] = None
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +523,14 @@ class InstrumentManager:
         near_otm_calls = sorted(otm_calls, key=lambda s: s.strike_price)[:2]
         near_otm_puts  = sorted(otm_puts,  key=lambda s: -s.strike_price)[:2]
 
+        # First ITM strike on each side (one step inside ATM) for premium-pressure display
+        itm_calls = sorted([c for c in imap.all_calls if c.strike_price < atm_strike],
+                           key=lambda s: s.strike_price, reverse=True)
+        itm_puts  = sorted([p for p in imap.all_puts  if p.strike_price > atm_strike],
+                           key=lambda s: s.strike_price)
+        new_itm_call = itm_calls[0] if itm_calls else None
+        new_itm_put  = itm_puts[0]  if itm_puts  else None
+
         changed = (
             new_atm_call.security_id != imap.atm_call.security_id
             or new_atm_put.security_id  != imap.atm_put.security_id
@@ -537,6 +548,8 @@ class InstrumentManager:
         imap.otm_put        = new_otm_put
         imap.near_otm_calls = near_otm_calls
         imap.near_otm_puts  = near_otm_puts
+        imap.itm_call       = new_itm_call
+        imap.itm_put        = new_itm_put
         return changed
 
     def _parse_scrip_master(self, csv_text: str) -> tuple[list[OptionStrike], list[OptionStrike]]:
