@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 
@@ -57,13 +57,15 @@ export default function App() {
   const [liveSignals, setLiveSignals] = useState<Signal[]>([])
   const [tab, setTab] = useState<'blotter' | 'config'>('blotter')
   const [serverStartedAt, setServerStartedAt] = useState<number>()
-  // Rolling price histories for option-pressure panel (last 30 ticks ≈ ~1 min)
+  // Rolling price histories for option-pressure panel (15-min window at 2s heartbeat)
   const [itmCallHist, setItmCallHist] = useState<number[]>([])
   const [atmCallHist, setAtmCallHist] = useState<number[]>([])
   const [otmCallHist, setOtmCallHist] = useState<number[]>([])
   const [otmPutHist,  setOtmPutHist]  = useState<number[]>([])
   const [atmPutHist,  setAtmPutHist]  = useState<number[]>([])
   const [itmPutHist,  setItmPutHist]  = useState<number[]>([])
+  // Track server reconnect count so histories are wiped when the instrument grid changes
+  const prevReconnectRef = useRef<number>(-1)
 
   const { trades, refresh: refreshTrades } = useTrades(100)
   const { signals, refresh: refreshSignals } = useSignals(30)
@@ -82,10 +84,17 @@ export default function App() {
           [...prev, { t, pnl: msg.daily_pnl ?? 0 }].slice(-900)
         )
       }
-      // Accumulate per-leg price histories for pressure panel
-      // 15-min window at 2s heartbeat = 450 ticks
-      const push = (setter: React.Dispatch<React.SetStateAction<number[]>>, val: number | undefined) => {
-        if (val != null && val > 0)
+      // Clear all histories when the server reconnected (instrument grid may have changed)
+      const rc = msg.reconnect_count ?? 0
+      if (rc !== prevReconnectRef.current && prevReconnectRef.current !== -1) {
+        setItmCallHist([]); setAtmCallHist([]); setOtmCallHist([])
+        setOtmPutHist([]);  setAtmPutHist([]);  setItmPutHist([])
+      }
+      prevReconnectRef.current = rc
+
+      // Accumulate per-leg price histories (15-min window at 2s heartbeat = 450 ticks)
+      const push = (setter: (fn: (p: number[]) => number[]) => void, val: number | undefined) => {
+        if (val !== undefined && val !== null && val > 0)
           setter(prev => [...prev, val].slice(-450))
       }
       push(setItmCallHist, msg.itm_call_ltp)

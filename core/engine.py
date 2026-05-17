@@ -484,6 +484,7 @@ class Engine:
                 "market_bias":    self.state.market_bias,
                 "spot_delta_5m":  self.state.spot_delta_5m,
                 "last_z_score":   self.state.last_z_score,
+                "reconnect_count": self.state.reconnect_count,
                 "last_ratio":     self.state.last_ratio,
             })
             await asyncio.sleep(2.0)
