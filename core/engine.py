@@ -143,6 +143,7 @@ class Engine:
             cooldown_minutes=exc_cfg["cooldown_minutes"],
             morning_filter_start=exc_cfg["morning_filter_start"],
             morning_filter_end=exc_cfg["morning_filter_end"],
+            last_entry_time=exc_cfg.get("last_entry_time", "14:00"),
             force_close_time=exc_cfg["force_close_time"],
             daily_drawdown_kill_pct=exc_cfg["daily_drawdown_kill_pct"],
             lot_size=self._cfg["instrument"]["lot_size"],
@@ -355,7 +356,9 @@ class Engine:
             "atm_symbol": signal.atm_symbol,
         }
 
-        atm_ltp = self.state.atm_ltp
+        # Use the ATM leg that matches the signal direction for pricing.
+        atm_ltp = (self.state.atm_ltp if signal.direction == "CALL"
+                   else self.state.atm_put_ltp)
         if atm_ltp <= 0:
             return
 

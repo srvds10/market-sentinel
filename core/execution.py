@@ -105,6 +105,7 @@ class ExecutionConfig:
     min_hold_minutes: float = 3.0   # divergence exit blocked for this long after open
     morning_filter_start: str = "09:15"
     morning_filter_end: str = "09:30"
+    last_entry_time: str = "14:00"  # no new trades opened after this time
     force_close_time: str = "15:15"
     daily_drawdown_kill_pct: float = 0.40
     lot_size: int = 50
@@ -196,17 +197,16 @@ class ExecutionEngine:
         return EngineBlock.NONE
 
     def _in_trading_window(self) -> bool:
-        """True only after the opening blackout ends and before force-close.
+        """True only in the window where new trades may open.
 
-        Opening blackout = config.morning_filter_start ... morning_filter_end
-        (typically 09:15–09:30, when opening-auction noise is highest).
-        After morning_filter_end and strictly before force_close_time, new
-        trades may open.  All checks are in IST.
+        Window = after morning_filter_end (09:30) and before last_entry_time (14:00).
+        force_close_time (15:15) is separate — it closes existing positions but is
+        not used for entry gating.  All checks are in IST.
         """
-        now_min   = ist_minutes_now()
+        now_min      = ist_minutes_now()
         blackout_end = hhmm_to_minutes(self.config.morning_filter_end)
-        cutoff       = hhmm_to_minutes(self.config.force_close_time)
-        return blackout_end <= now_min < cutoff
+        last_entry   = hhmm_to_minutes(self.config.last_entry_time)
+        return blackout_end <= now_min < last_entry
 
     def _past_force_close(self) -> bool:
         return ist_minutes_now() >= hhmm_to_minutes(self.config.force_close_time)

@@ -3,7 +3,8 @@ import type { Trade } from '../types'
 
 interface Props {
   trade: Trade | null
-  atm_ltp: number
+  atm_call_ltp: number
+  atm_put_ltp: number
 }
 
 function fmt(n: number) {
@@ -14,7 +15,7 @@ function fmtTime(ts: number) {
   return new Date(ts * 1000).toLocaleTimeString('en-IN', { hour12: false })
 }
 
-export function PositionTracker({ trade, atm_ltp }: Props) {
+export function PositionTracker({ trade, atm_call_ltp, atm_put_ltp }: Props) {
   if (!trade) {
     return (
       <div className="rounded-lg border border-border bg-panel p-4 flex items-center justify-center h-32">
@@ -23,8 +24,11 @@ export function PositionTracker({ trade, atm_ltp }: Props) {
     )
   }
 
-  const unreal_pnl = (atm_ltp - trade.entry_price) * trade.qty * 50
-  const unreal_pct = (atm_ltp - trade.entry_price) / trade.entry_price
+  const current_ltp = trade.direction === 'CALL' ? atm_call_ltp : atm_put_ltp
+  const unreal_pnl = (current_ltp - trade.entry_price) * trade.qty * 50
+  const unreal_pct = trade.entry_price > 0
+    ? (current_ltp - trade.entry_price) / trade.entry_price
+    : 0
 
   return (
     <div className={clsx(
@@ -49,7 +53,7 @@ export function PositionTracker({ trade, atm_ltp }: Props) {
         <div className="text-right">₹{fmt(trade.entry_price)}</div>
 
         <div className="text-muted">Current</div>
-        <div className="text-right">₹{fmt(atm_ltp)}</div>
+        <div className="text-right">₹{fmt(current_ltp)}</div>
 
         <div className="text-muted">Qty × Lot</div>
         <div className="text-right">{trade.qty} × 50 = {trade.qty * 50}</div>

@@ -331,7 +331,11 @@ export default function App() {
           />
 
           {/* Open position */}
-          <PositionTracker trade={status.open_trade ?? null} atm_ltp={status.atm_ltp ?? 0} />
+          <PositionTracker
+            trade={status.open_trade ?? null}
+            atm_call_ltp={status.atm_ltp     ?? 0}
+            atm_put_ltp ={status.atm_put_ltp ?? 0}
+          />
 
           {/* Instrument map */}
           {status.instrument_map && (

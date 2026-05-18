@@ -34,6 +34,7 @@ MUTABLE_KEYS = {
     ("execution", "trailing_stop_pct"),
     ("execution", "cooldown_minutes"),
     ("execution", "daily_drawdown_kill_pct"),
+    ("execution", "last_entry_time"),
     ("execution", "morning_filter_start"),
     ("execution", "morning_filter_end"),
     ("execution", "virtual_capital"),

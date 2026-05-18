@@ -316,12 +316,16 @@ class SignalEngine:
         if z is None or z < self.config.zscore_threshold:
             return None
 
+        # Trade is placed on the ATM leg that matches the signal direction:
+        # CALL signal → buy ATM call, PUT signal → buy ATM put.
+        atm_symbol = (self._atm_call_symbol if direction == "CALL"
+                      else self._atm_put_symbol)
         return SignalEvent(
             timestamp=ts,
             z_score=round(z, 4),
             ratio=round(ratio, 6),
             spot_ltp=spot_win.latest() or 0.0,
-            atm_symbol=self._atm_call_symbol,
+            atm_symbol=atm_symbol,
             otm_call_symbol=self._otm_call_symbol,
             otm_put_symbol=self._otm_put_symbol,
             direction=direction,

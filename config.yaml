@@ -30,6 +30,7 @@ execution:
   min_hold_minutes: 3         # divergence exit blocked for this long after open
   morning_filter_start: "09:15"
   morning_filter_end: "09:30"
+  last_entry_time: "14:00"
   force_close_time: "15:15"
   daily_drawdown_kill_pct: 0.40  # halt if cumulative daily loss >= 40%
   slippage_rupees: 2.0        # per-share fill cost on entry & exit (bid-ask)
