@@ -132,13 +132,27 @@ export default function App() {
               <span className="text-white">{uptime}</span>
             </div>
           )}
-          {/* Spot */}
+          {/* Spot + VWAP */}
           <div className="flex flex-col items-end">
             <span className="text-muted text-[9px] uppercase">NIFTY Spot</span>
             <span className="text-white font-semibold">
               {status.spot_ltp ? fmt(status.spot_ltp, 2) : '—'}
             </span>
           </div>
+          {status.vwap != null && (
+            <div className="flex flex-col items-end">
+              <span className="text-muted text-[9px] uppercase">VWAP</span>
+              <div className="flex items-center gap-1">
+                <span className={clsx(
+                  'text-[9px] font-bold px-1 rounded',
+                  status.above_vwap ? 'bg-bull/20 text-bull' : 'bg-bear/20 text-bear',
+                )}>
+                  {status.above_vwap ? '▲ ABOVE' : '▼ BELOW'}
+                </span>
+                <span className="text-white">{fmt(status.vwap, 2)}</span>
+              </div>
+            </div>
+          )}
           {/* ATM */}
           <div className="flex flex-col items-end">
             <span className="text-muted text-[9px] uppercase">ATM Option</span>

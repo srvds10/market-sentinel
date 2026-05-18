@@ -26,6 +26,9 @@ export interface StatusPayload {
   instrument_map: InstrumentMap | null
   server_time: number
   last_heartbeat: number
+  vwap: number | null
+  above_vwap: boolean | null
+  pressure_verdict: string | null
   itm_call_mins: number[]
   atm_call_mins: number[]
   otm_call_mins: number[]
