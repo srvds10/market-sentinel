@@ -90,3 +90,14 @@ export async function fetchLogSize(): Promise<{ bytes: number; exists: boolean }
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
+
+export async function clearRecords(opts: { trades?: boolean; signals?: boolean; logs?: boolean } = {}) {
+  const params = new URLSearchParams()
+  if (opts.trades  !== undefined) params.set('trades',  String(opts.trades))
+  if (opts.signals !== undefined) params.set('signals', String(opts.signals))
+  if (opts.logs    !== undefined) params.set('logs',    String(opts.logs))
+  const url = `/api/records/clear${params.toString() ? '?' + params : ''}`
+  const res = await fetch(url, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json() as Promise<{ cleared: boolean; deleted: Record<string, number> }>
+}

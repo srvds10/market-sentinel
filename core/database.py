@@ -171,6 +171,27 @@ class Database:
         )
 
     # ------------------------------------------------------------------
+    # Records management
+    # ------------------------------------------------------------------
+
+    async def clear_records(self, trades: bool = True, signals: bool = True, logs: bool = False) -> dict[str, int]:
+        """Delete rows from the requested tables. Returns row counts deleted per table."""
+        counts: dict[str, int] = {}
+        tables = []
+        if trades:
+            tables.append(("trades", "trades"))
+        if signals:
+            tables.append(("signal_events", "signals"))
+        if logs:
+            tables.append(("system_log", "logs"))
+        for table, key in tables:
+            async with self._db.execute(f"SELECT COUNT(*) FROM {table}") as cur:
+                counts[key] = (await cur.fetchone())[0]
+            await self._db.execute(f"DELETE FROM {table}")
+        await self._db.commit()
+        return counts
+
+    # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 

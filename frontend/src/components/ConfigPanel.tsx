@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
-import { fetchConfig, patchConfig, updateToken, downloadLogs, clearLogs, fetchLogSize } from '../hooks/useApi'
+import { fetchConfig, patchConfig, updateToken, downloadLogs, clearLogs, fetchLogSize, clearRecords } from '../hooks/useApi'
 
 type ConfigMap = Record<string, Record<string, unknown>>
 
@@ -28,6 +28,7 @@ export function ConfigPanel() {
   const [savingToken, setSavingToken] = useState(false)
   const [logSize, setLogSize]         = useState<number | null>(null)
   const [logBusy, setLogBusy]         = useState(false)
+  const [recBusy, setRecBusy]         = useState(false)
 
   useEffect(() => {
     fetchConfig().then(setCfg).catch(() => {})
@@ -190,6 +191,64 @@ export function ConfigPanel() {
         Changes save instantly. Virtual capital takes effect on next day reset (09:15).
         Closing the browser does NOT stop the engine — it runs 24/7 on the server.
       </p>
+
+      {/* ── Clear Records ── */}
+      <div className="rounded border border-bear/30 bg-bear/5 p-3 flex flex-col gap-2">
+        <div className="text-bear uppercase tracking-wider text-[10px]">Clear Database Records</div>
+        <p className="text-muted text-[10px] leading-relaxed">
+          Permanently deletes trades and/or signals from the database. Cannot be undone.
+        </p>
+        <div className="flex gap-2 flex-wrap">
+          <button
+            onClick={async () => {
+              if (!confirm('Delete ALL trade records? This cannot be undone.')) return
+              setRecBusy(true)
+              try {
+                const r = await clearRecords({ trades: true, signals: false })
+                flash(`✓ Cleared ${r.deleted.trades ?? 0} trade(s)`, true)
+              } catch (e: unknown) {
+                flash(`✗ ${e instanceof Error ? e.message : String(e)}`, false)
+              } finally { setRecBusy(false) }
+            }}
+            disabled={recBusy}
+            className="px-2 py-1 rounded bg-bear/20 hover:bg-bear/40 border border-bear/30 text-bear disabled:opacity-40"
+          >
+            {recBusy ? '…' : 'Clear Trades'}
+          </button>
+          <button
+            onClick={async () => {
+              if (!confirm('Delete ALL signal records? This cannot be undone.')) return
+              setRecBusy(true)
+              try {
+                const r = await clearRecords({ trades: false, signals: true })
+                flash(`✓ Cleared ${r.deleted.signals ?? 0} signal(s)`, true)
+              } catch (e: unknown) {
+                flash(`✗ ${e instanceof Error ? e.message : String(e)}`, false)
+              } finally { setRecBusy(false) }
+            }}
+            disabled={recBusy}
+            className="px-2 py-1 rounded bg-bear/20 hover:bg-bear/40 border border-bear/30 text-bear disabled:opacity-40"
+          >
+            {recBusy ? '…' : 'Clear Signals'}
+          </button>
+          <button
+            onClick={async () => {
+              if (!confirm('Delete ALL trades AND signals? This cannot be undone.')) return
+              setRecBusy(true)
+              try {
+                const r = await clearRecords({ trades: true, signals: true })
+                flash(`✓ Cleared ${r.deleted.trades ?? 0} trade(s) + ${r.deleted.signals ?? 0} signal(s)`, true)
+              } catch (e: unknown) {
+                flash(`✗ ${e instanceof Error ? e.message : String(e)}`, false)
+              } finally { setRecBusy(false) }
+            }}
+            disabled={recBusy}
+            className="px-2 py-1 rounded bg-bear/30 hover:bg-bear/50 border border-bear/40 text-bear font-semibold disabled:opacity-40"
+          >
+            {recBusy ? '…' : 'Clear All'}
+          </button>
+        </div>
+      </div>
 
       {/* ── Error Logs ── */}
       <div className="rounded border border-border bg-surface p-3 flex flex-col gap-2">

@@ -29,6 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import config as config_router
 from api.routes import logs as logs_router
+from api.routes import records as records_router
 from api.routes import status as status_router
 from api.routes import trades as trades_router
 from api.ws import broadcast_loop, ws_endpoint
@@ -122,6 +123,7 @@ app.add_middleware(
 
 app.include_router(status_router.router)
 app.include_router(trades_router.router)
+app.include_router(records_router.router)
 app.include_router(config_router.router)
 app.include_router(logs_router.router)
 
