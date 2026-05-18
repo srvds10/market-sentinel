@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import clsx from 'clsx'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 
@@ -57,17 +57,6 @@ export default function App() {
   const [liveSignals, setLiveSignals] = useState<Signal[]>([])
   const [tab, setTab] = useState<'blotter' | 'config'>('blotter')
   const [serverStartedAt, setServerStartedAt] = useState<number>()
-  // Per-minute price snapshots for option-pressure panel (15-slot ring buffer)
-  const [itmCallMins, setItmCallMins] = useState<number[]>([])
-  const [atmCallMins, setAtmCallMins] = useState<number[]>([])
-  const [otmCallMins, setOtmCallMins] = useState<number[]>([])
-  const [otmPutMins,  setOtmPutMins]  = useState<number[]>([])
-  const [atmPutMins,  setAtmPutMins]  = useState<number[]>([])
-  const [itmPutMins,  setItmPutMins]  = useState<number[]>([])
-  // Track server reconnect count so histories are wiped when the instrument grid changes
-  const prevReconnectRef = useRef<number>(-1)
-  // Ref to latest status so the 60s interval can read current LTPs without re-subscribing
-  const statusRef = useRef<Partial<StatusPayload>>({})
 
   const { trades, refresh: refreshTrades } = useTrades(100)
   const { signals, refresh: refreshSignals } = useSignals(30)
@@ -86,13 +75,6 @@ export default function App() {
           [...prev, { t, pnl: msg.daily_pnl ?? 0 }].slice(-900)
         )
       }
-      // Clear all minute snapshots when the server reconnected (instrument grid may have changed)
-      const rc = msg.reconnect_count ?? 0
-      if (rc !== prevReconnectRef.current && prevReconnectRef.current !== -1) {
-        setItmCallMins([]); setAtmCallMins([]); setOtmCallMins([])
-        setOtmPutMins([]);  setAtmPutMins([]);  setItmPutMins([])
-      }
-      prevReconnectRef.current = rc
     } else if (msg.type === 'signal') {
       setLiveSignals(prev => [msg as Signal, ...prev].slice(0, 30))
       refreshSignals()
@@ -107,26 +89,6 @@ export default function App() {
   }, [refreshSignals, refreshTrades])
 
   const connected = useWebSocket(WS_URL, onMessage)
-
-  // Keep statusRef in sync so the interval below can read the latest LTPs
-  useEffect(() => { statusRef.current = status }, [status])
-
-  // Every 60s: snapshot the current LTP for each leg into the 15-slot ring buffer
-  useEffect(() => {
-    const id = setInterval(() => {
-      const s = statusRef.current
-      const snap = (setter: (fn: (p: number[]) => number[]) => void, val: number | undefined) => {
-        if (val && val > 0) setter(prev => [...prev, val].slice(-15))
-      }
-      snap(setItmCallMins, s.itm_call_ltp)
-      snap(setAtmCallMins, s.atm_ltp)
-      snap(setOtmCallMins, s.otm_call_ltp)
-      snap(setOtmPutMins,  s.otm_put_ltp)
-      snap(setAtmPutMins,  s.atm_put_ltp)
-      snap(setItmPutMins,  s.itm_put_ltp)
-    }, 60_000)
-    return () => clearInterval(id)
-  }, [])
 
   // On every (re)connect: pre-populate all status fields from the HTTP snapshot
   // so the UI shows real engine state immediately instead of blanks for 2s.
@@ -332,12 +294,12 @@ export default function App() {
             otmPutLtp ={status.otm_put_ltp   ?? 0}
             atmPutLtp ={status.atm_put_ltp   ?? 0}
             itmPutLtp ={status.itm_put_ltp   ?? 0}
-            itmCallMins={itmCallMins}
-            atmCallMins={atmCallMins}
-            otmCallMins={otmCallMins}
-            otmPutMins ={otmPutMins}
-            atmPutMins ={atmPutMins}
-            itmPutMins ={itmPutMins}
+            itmCallMins={status.itm_call_mins ?? []}
+            atmCallMins={status.atm_call_mins ?? []}
+            otmCallMins={status.otm_call_mins ?? []}
+            otmPutMins ={status.otm_put_mins  ?? []}
+            atmPutMins ={status.atm_put_mins  ?? []}
+            itmPutMins ={status.itm_put_mins  ?? []}
           />
 
           {/* Open position */}

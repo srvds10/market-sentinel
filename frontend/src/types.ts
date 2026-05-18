@@ -26,6 +26,12 @@ export interface StatusPayload {
   instrument_map: InstrumentMap | null
   server_time: number
   last_heartbeat: number
+  itm_call_mins: number[]
+  atm_call_mins: number[]
+  otm_call_mins: number[]
+  otm_put_mins:  number[]
+  atm_put_mins:  number[]
+  itm_put_mins:  number[]
 }
 
 export interface Trade {

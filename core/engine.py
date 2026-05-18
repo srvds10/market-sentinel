@@ -81,6 +81,14 @@ class AppState:
     started_at: float = field(default_factory=time.time)
     last_heartbeat: float = field(default_factory=time.time)
 
+    # Per-minute LTP snapshots for the Option Pressure panel (max 15 entries each)
+    itm_call_mins: list[float] = field(default_factory=list)
+    atm_call_mins: list[float] = field(default_factory=list)
+    otm_call_mins: list[float] = field(default_factory=list)
+    otm_put_mins:  list[float] = field(default_factory=list)
+    atm_put_mins:  list[float] = field(default_factory=list)
+    itm_put_mins:  list[float] = field(default_factory=list)
+
     # broadcast queue: engine writes, FastAPI WS broadcaster reads
     broadcast_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     # set by /api/token to trigger immediate WS reconnect
@@ -186,6 +194,7 @@ class Engine:
             asyncio.create_task(self._instrument_manager.run(), name="instruments"),
             asyncio.create_task(self._tick_loop(), name="tick_loop"),
             asyncio.create_task(self._heartbeat(), name="heartbeat"),
+            asyncio.create_task(self._minute_snapshot_loop(), name="minute_snapshots"),
         ]
 
         try:
@@ -230,6 +239,13 @@ class Engine:
 
             self._reconnect_count += 1
             self.state.reconnect_count = self._reconnect_count
+            # Instrument grid may have shifted — drop stale per-minute snapshots
+            self.state.itm_call_mins.clear()
+            self.state.atm_call_mins.clear()
+            self.state.otm_call_mins.clear()
+            self.state.otm_put_mins.clear()
+            self.state.atm_put_mins.clear()
+            self.state.itm_put_mins.clear()
             delay = self._cfg["ws"]["reconnect_delay_seconds"]
             logger.info("Reconnecting in %ss (attempt %d)", delay, self._reconnect_count)
             await asyncio.sleep(delay)
@@ -467,6 +483,23 @@ class Engine:
         except asyncio.QueueFull:
             pass
 
+    async def _minute_snapshot_loop(self) -> None:
+        """Every 60s, sample each leg's current LTP into a 15-slot ring buffer."""
+        def push(buf: list[float], val: float) -> None:
+            if val > 0:
+                buf.append(val)
+                if len(buf) > 15:
+                    del buf[0]
+
+        while True:
+            await asyncio.sleep(60.0)
+            push(self.state.itm_call_mins, self.state.itm_call_ltp)
+            push(self.state.atm_call_mins, self.state.atm_ltp)
+            push(self.state.otm_call_mins, self.state.otm_call_ltp)
+            push(self.state.otm_put_mins,  self.state.otm_put_ltp)
+            push(self.state.atm_put_mins,  self.state.atm_put_ltp)
+            push(self.state.itm_put_mins,  self.state.itm_put_ltp)
+
     async def _heartbeat(self) -> None:
         while True:
             self.state.last_heartbeat = time.time()
@@ -489,6 +522,12 @@ class Engine:
                 "last_z_score":   self.state.last_z_score,
                 "reconnect_count": self.state.reconnect_count,
                 "last_ratio":     self.state.last_ratio,
+                "itm_call_mins":  list(self.state.itm_call_mins),
+                "atm_call_mins":  list(self.state.atm_call_mins),
+                "otm_call_mins":  list(self.state.otm_call_mins),
+                "otm_put_mins":   list(self.state.otm_put_mins),
+                "atm_put_mins":   list(self.state.atm_put_mins),
+                "itm_put_mins":   list(self.state.itm_put_mins),
             })
             await asyncio.sleep(2.0)
 

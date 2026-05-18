@@ -56,4 +56,10 @@ async def get_status(request: Request) -> dict:
         "started_at":         state.started_at,
         "server_time":        time.time(),
         "last_heartbeat":     state.last_heartbeat,
+        "itm_call_mins":      list(state.itm_call_mins),
+        "atm_call_mins":      list(state.atm_call_mins),
+        "otm_call_mins":      list(state.otm_call_mins),
+        "otm_put_mins":       list(state.otm_put_mins),
+        "atm_put_mins":       list(state.atm_put_mins),
+        "itm_put_mins":       list(state.itm_put_mins),
     }
