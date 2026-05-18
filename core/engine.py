@@ -22,7 +22,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -33,7 +33,7 @@ from core.database import Database
 from core.execution import ExecutionConfig, ExecutionEngine, ExitReason
 from core.instruments import InstrumentManager
 from core.signal import SignalConfig, SignalEngine, SignalEvent, Tick
-from core.timeutil import is_weekday_ist, ist_minutes_now
+from core.timeutil import is_weekday_ist, ist_minutes_now, now_ist
 from core.ws_client import DhanWSClient, TickProvider
 
 logger = logging.getLogger(__name__)
@@ -538,7 +538,7 @@ class Engine:
         if tick.symbol == imap.spot_symbol:
             self.state.spot_ltp = tick.ltp
             # TWAP accumulator — reset at the start of each calendar day (IST)
-            today_ord = date.today().toordinal()
+            today_ord = now_ist().date().toordinal()
             if today_ord != self._vwap_day:
                 self._vwap_sum = 0.0
                 self._vwap_count = 0
