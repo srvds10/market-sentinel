@@ -163,7 +163,8 @@ function CompositeBar({ callPressures, putPressures }: CompositeBarProps) {
   const vd        = VERDICT_DEF[verdict]
   const callStyle = STYLE[callGroup]
   const putStyle  = STYLE[putGroup]
-  const dotLabels = ['ITM', 'ATM', 'OTM']
+  const callDotLabels = ['ITM', 'ATM', 'OTM']
+  const putDotLabels  = ['OTM', 'ATM', 'ITM']
 
   return (
     <div className={clsx('mt-2 rounded border p-2 flex items-center gap-3', vd.borderCls)}>
@@ -173,7 +174,7 @@ function CompositeBar({ callPressures, putPressures }: CompositeBarProps) {
         <span className="text-[8px] text-bull font-bold uppercase tracking-wider">Calls</span>
         <div className="flex gap-1.5">
           {callPressures.map((p, i) => (
-            <PressureDot key={i} pressure={p} label={dotLabels[i]} />
+            <PressureDot key={i} pressure={p} label={callDotLabels[i]} />
           ))}
         </div>
         <span className={clsx('text-[9px] font-semibold flex items-center gap-0.5', callStyle.cls)}>
@@ -195,7 +196,7 @@ function CompositeBar({ callPressures, putPressures }: CompositeBarProps) {
         <span className="text-[8px] text-bear font-bold uppercase tracking-wider">Puts</span>
         <div className="flex gap-1.5">
           {putPressures.map((p, i) => (
-            <PressureDot key={i} pressure={p} label={dotLabels[i]} />
+            <PressureDot key={i} pressure={p} label={putDotLabels[i]} />
           ))}
         </div>
         <span className={clsx('text-[9px] font-semibold flex items-center gap-0.5', putStyle.cls)}>

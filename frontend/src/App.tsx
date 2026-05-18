@@ -145,9 +145,11 @@ export default function App() {
               <div className="flex items-center gap-1">
                 <span className={clsx(
                   'text-[9px] font-bold px-1 rounded',
-                  status.above_vwap ? 'bg-bull/20 text-bull' : 'bg-bear/20 text-bear',
+                  status.above_vwap === true  ? 'bg-bull/20 text-bull' :
+                  status.above_vwap === false ? 'bg-bear/20 text-bear' :
+                  'bg-muted/20 text-muted',
                 )}>
-                  {status.above_vwap ? '▲ ABOVE' : '▼ BELOW'}
+                  {status.above_vwap === true ? '▲ ABOVE' : status.above_vwap === false ? '▼ BELOW' : '— VWAP'}
                 </span>
                 <span className="text-white">{fmt(status.vwap, 2)}</span>
               </div>

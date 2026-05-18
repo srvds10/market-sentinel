@@ -308,6 +308,7 @@ class Engine:
             self.state.otm_put_mins.clear()
             self.state.atm_put_mins.clear()
             self.state.itm_put_mins.clear()
+            self.state.pressure_verdict = 'WAIT'
             delay = self._cfg["ws"]["reconnect_delay_seconds"]
             logger.info("Reconnecting in %ss (attempt %d)", delay, self._reconnect_count)
             await asyncio.sleep(delay)
