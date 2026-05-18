@@ -83,6 +83,17 @@ async def lifespan(app: FastAPI):
         broadcast_loop(engine.state.broadcast_queue), name="broadcast"
     )
 
+    # Surface unexpected crashes immediately instead of letting them
+    # silently close the DB while the API keeps serving stale state.
+    def _log_task_crash(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.error("Background task %r crashed", t.get_name(), exc_info=exc)
+    engine_task.add_done_callback(_log_task_crash)
+    broadcast_task.add_done_callback(_log_task_crash)
+
     logger.info("Market Sentinel API ready")
     yield
 

@@ -18,12 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import csv
-import datetime
 import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -539,7 +538,7 @@ class Engine:
         if tick.symbol == imap.spot_symbol:
             self.state.spot_ltp = tick.ltp
             # TWAP accumulator — reset at the start of each calendar day (IST)
-            today_ord = datetime.date.today().toordinal()
+            today_ord = date.today().toordinal()
             if today_ord != self._vwap_day:
                 self._vwap_sum = 0.0
                 self._vwap_count = 0
