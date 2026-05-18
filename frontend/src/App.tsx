@@ -4,6 +4,7 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceL
 
 import { ZScoreGauge } from './components/ZScoreGauge'
 import { MarketBias } from './components/MarketBias'
+import { OptionPressure } from './components/OptionPressure'
 import { SignalFeed } from './components/SignalFeed'
 import { PositionTracker } from './components/PositionTracker'
 import { TradeBlotter } from './components/TradeBlotter'
@@ -131,13 +132,27 @@ export default function App() {
               <span className="text-white">{uptime}</span>
             </div>
           )}
-          {/* Spot */}
+          {/* Spot + VWAP */}
           <div className="flex flex-col items-end">
             <span className="text-muted text-[9px] uppercase">NIFTY Spot</span>
             <span className="text-white font-semibold">
               {status.spot_ltp ? fmt(status.spot_ltp, 2) : '—'}
             </span>
           </div>
+          {status.vwap != null && (
+            <div className="flex flex-col items-end">
+              <span className="text-muted text-[9px] uppercase">VWAP</span>
+              <div className="flex items-center gap-1">
+                <span className={clsx(
+                  'text-[9px] font-bold px-1 rounded',
+                  status.above_vwap ? 'bg-bull/20 text-bull' : 'bg-bear/20 text-bear',
+                )}>
+                  {status.above_vwap ? '▲ ABOVE' : '▼ BELOW'}
+                </span>
+                <span className="text-white">{fmt(status.vwap, 2)}</span>
+              </div>
+            </div>
+          )}
           {/* ATM */}
           <div className="flex flex-col items-end">
             <span className="text-muted text-[9px] uppercase">ATM Option</span>
@@ -285,8 +300,28 @@ export default function App() {
             )}
           </div>
 
+          {/* Option premium pressure */}
+          <OptionPressure
+            itmCallLtp={status.itm_call_ltp ?? 0}
+            atmCallLtp={status.atm_ltp       ?? 0}
+            otmCallLtp={status.otm_call_ltp  ?? 0}
+            otmPutLtp ={status.otm_put_ltp   ?? 0}
+            atmPutLtp ={status.atm_put_ltp   ?? 0}
+            itmPutLtp ={status.itm_put_ltp   ?? 0}
+            itmCallMins={status.itm_call_mins ?? []}
+            atmCallMins={status.atm_call_mins ?? []}
+            otmCallMins={status.otm_call_mins ?? []}
+            otmPutMins ={status.otm_put_mins  ?? []}
+            atmPutMins ={status.atm_put_mins  ?? []}
+            itmPutMins ={status.itm_put_mins  ?? []}
+          />
+
           {/* Open position */}
-          <PositionTracker trade={status.open_trade ?? null} atm_ltp={status.atm_ltp ?? 0} />
+          <PositionTracker
+            trade={status.open_trade ?? null}
+            atm_call_ltp={status.atm_ltp     ?? 0}
+            atm_put_ltp ={status.atm_put_ltp ?? 0}
+          />
 
           {/* Instrument map */}
           {status.instrument_map && (

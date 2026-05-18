@@ -151,7 +151,7 @@ def _engine(**overrides) -> ExecutionEngine:
         virtual_capital=100_000.0, max_position_pct=0.20, stop_loss_pct=0.30,
         trailing_stop_activation_pct=0.20, trailing_stop_pct=0.15,
         cooldown_minutes=0.0, morning_filter_start="00:00", morning_filter_end="00:00",
-        force_close_time="23:59", daily_drawdown_kill_pct=0.40, lot_size=50,
+        last_entry_time="23:59", force_close_time="23:59", daily_drawdown_kill_pct=0.40, lot_size=50,
         slippage_rupees=0.0, scale_by_zscore=False,
     )
     for k, v in overrides.items():
@@ -217,11 +217,11 @@ class TestTradingWindow:
         trade = eng.try_open(make_signal(), atm_ltp=100.0, atm_symbol="ATM-CE")
         assert trade is None
 
-    def test_post_force_close_blocks_open(self, monkeypatch):
-        eng = _engine(morning_filter_end="09:30", force_close_time="15:15")
+    def test_past_last_entry_blocks_open(self, monkeypatch):
+        eng = _engine(morning_filter_end="09:30", last_entry_time="14:00", force_close_time="15:15")
         eng.reset_day()
-        # Pretend IST is 15:20 — past force-close
-        monkeypatch.setattr("core.execution.ist_minutes_now", lambda: 15 * 60 + 20)
+        # Pretend IST is 14:05 — past last-entry cutoff (new trades blocked)
+        monkeypatch.setattr("core.execution.ist_minutes_now", lambda: 14 * 60 + 5)
         trade = eng.try_open(make_signal(), atm_ltp=100.0, atm_symbol="ATM-CE")
         assert trade is None
 

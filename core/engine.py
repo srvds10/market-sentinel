@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import datetime
 import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -60,6 +61,9 @@ class AppState:
     engine_state: EngineState = EngineState.IDLE
     spot_ltp: float = 0.0
     atm_ltp: float = 0.0
+    atm_put_ltp: float = 0.0
+    itm_call_ltp: float = 0.0
+    itm_put_ltp: float = 0.0
     otm_call_ltp: float = 0.0
     otm_put_ltp: float = 0.0
     last_z_score: float | None = None
@@ -77,6 +81,21 @@ class AppState:
     reconnect_count: int = 0
     started_at: float = field(default_factory=time.time)
     last_heartbeat: float = field(default_factory=time.time)
+
+    # Intraday TWAP (proxy for VWAP; resets each calendar day)
+    vwap: float | None = None
+    above_vwap: bool | None = None
+
+    # Current composite pressure verdict (updated every minute alongside *_mins)
+    pressure_verdict: str = 'WAIT'
+
+    # Per-minute LTP snapshots for the Option Pressure panel (max 15 entries each)
+    itm_call_mins: list[float] = field(default_factory=list)
+    atm_call_mins: list[float] = field(default_factory=list)
+    otm_call_mins: list[float] = field(default_factory=list)
+    otm_put_mins:  list[float] = field(default_factory=list)
+    atm_put_mins:  list[float] = field(default_factory=list)
+    itm_put_mins:  list[float] = field(default_factory=list)
 
     # broadcast queue: engine writes, FastAPI WS broadcaster reads
     broadcast_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
@@ -106,6 +125,56 @@ def load_config(path: str = "config.yaml") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Option-pressure helpers (mirrors OptionPressure.tsx logic)
+# ---------------------------------------------------------------------------
+
+_PRESSURE_THRESHOLD = 0.01  # 1 % deviation triggers a signal
+
+
+def _leg_pressure(minutes: list[float]) -> str:
+    pts = [v for v in minutes if v > 0]
+    if len(pts) < 3:
+        return 'WAIT'
+    mean = sum(pts) / len(pts)
+    if mean == 0:
+        return 'WAIT'
+    pct = (pts[-1] - mean) / mean
+    if pct > _PRESSURE_THRESHOLD:
+        return 'EXPANDING'
+    if pct < -_PRESSURE_THRESHOLD:
+        return 'SQUEEZING'
+    return 'FLAT'
+
+
+def _group_pressure(pressures: list[str]) -> str:
+    active = [p for p in pressures if p != 'WAIT']
+    if not active:
+        return 'WAIT'
+    n = len(active)
+    exp = active.count('EXPANDING')
+    sqz = active.count('SQUEEZING')
+    if exp > sqz and exp >= (n + 1) // 2:
+        return 'EXPANDING'
+    if sqz > exp and sqz >= (n + 1) // 2:
+        return 'SQUEEZING'
+    return 'FLAT'
+
+
+def _compute_pressure_verdict(call_g: str, put_g: str) -> str:
+    if call_g == 'WAIT' and put_g == 'WAIT':
+        return 'WAIT'
+    if call_g == 'EXPANDING' and put_g == 'EXPANDING':
+        return 'BOTH_EXPAND'
+    if call_g == 'SQUEEZING' and put_g == 'SQUEEZING':
+        return 'BOTH_SQUEEZE'
+    if call_g == 'EXPANDING' and put_g == 'SQUEEZING':
+        return 'CALL_DOMINANT'
+    if call_g == 'SQUEEZING' and put_g == 'EXPANDING':
+        return 'PUT_DOMINANT'
+    return 'MIXED'
+
+
+# ---------------------------------------------------------------------------
 # Main engine
 # ---------------------------------------------------------------------------
 
@@ -118,6 +187,10 @@ class Engine:
         self._db = Database(self._cfg["logging"]["db_path"])
         self._tick_queue: asyncio.Queue[Tick] = asyncio.Queue(maxsize=4096)
         self._reconnect_count = 0
+        # Intraday TWAP accumulator (resets each calendar day in IST)
+        self._vwap_sum: float = 0.0
+        self._vwap_count: int = 0
+        self._vwap_day: int = -1  # ordinal of last reset date
 
         # Build sub-engines from config
         sig_cfg = self._cfg["signal"]
@@ -140,6 +213,7 @@ class Engine:
             cooldown_minutes=exc_cfg["cooldown_minutes"],
             morning_filter_start=exc_cfg["morning_filter_start"],
             morning_filter_end=exc_cfg["morning_filter_end"],
+            last_entry_time=exc_cfg.get("last_entry_time", "14:00"),
             force_close_time=exc_cfg["force_close_time"],
             daily_drawdown_kill_pct=exc_cfg["daily_drawdown_kill_pct"],
             lot_size=self._cfg["instrument"]["lot_size"],
@@ -182,6 +256,7 @@ class Engine:
             asyncio.create_task(self._instrument_manager.run(), name="instruments"),
             asyncio.create_task(self._tick_loop(), name="tick_loop"),
             asyncio.create_task(self._heartbeat(), name="heartbeat"),
+            asyncio.create_task(self._minute_snapshot_loop(), name="minute_snapshots"),
         ]
 
         try:
@@ -226,6 +301,13 @@ class Engine:
 
             self._reconnect_count += 1
             self.state.reconnect_count = self._reconnect_count
+            # Instrument grid may have shifted — drop stale per-minute snapshots
+            self.state.itm_call_mins.clear()
+            self.state.atm_call_mins.clear()
+            self.state.otm_call_mins.clear()
+            self.state.otm_put_mins.clear()
+            self.state.atm_put_mins.clear()
+            self.state.itm_put_mins.clear()
             delay = self._cfg["ws"]["reconnect_delay_seconds"]
             logger.info("Reconnecting in %ss (attempt %d)", delay, self._reconnect_count)
             await asyncio.sleep(delay)
@@ -352,25 +434,54 @@ class Engine:
             "atm_symbol": signal.atm_symbol,
         }
 
-        atm_ltp = self.state.atm_ltp
+        # Use the ATM leg that matches the signal direction for pricing.
+        atm_ltp = (self.state.atm_ltp if signal.direction == "CALL"
+                   else self.state.atm_put_ltp)
         if atm_ltp <= 0:
             return
 
-        # Bias-confirmation gate: only act when the 1-min option-flow bias
-        # agrees with the Z-score direction. BULLISH bias + CALL signal, or
-        # BEARISH bias + PUT signal. SIDEWAYS / UNKNOWN / opposite-bias signals
-        # are recorded but not traded.
+        # --- Gate 1: market-bias confirmation ---------------------------------
+        # BULLISH bias + CALL, or BEARISH bias + PUT. Opposite / unknown = skip.
+        skip_reason: str | None = None
         bias = self.state.market_bias
-        aligned = (
+        if not (
             (bias == "BULLISH" and signal.direction == "CALL")
             or (bias == "BEARISH" and signal.direction == "PUT")
-        )
-        if aligned:
-            trade = self._execution_engine.try_open(signal, atm_ltp, signal.atm_symbol)
-        else:
+        ):
+            skip_reason = f"bias={bias} does not confirm {signal.direction}"
+
+        # --- Gate 2: VWAP direction filter ------------------------------------
+        # CALL only when spot is above the intraday TWAP; PUT only when below.
+        if skip_reason is None and self.state.above_vwap is not None:
+            if signal.direction == "CALL" and not self.state.above_vwap:
+                skip_reason = (
+                    f"CALL blocked — spot {self.state.spot_ltp:.0f} is below "
+                    f"VWAP {self.state.vwap:.0f}"
+                )
+            elif signal.direction == "PUT" and self.state.above_vwap:
+                skip_reason = (
+                    f"PUT blocked — spot {self.state.spot_ltp:.0f} is above "
+                    f"VWAP {self.state.vwap:.0f}"
+                )
+
+        # --- Gate 3: option-premium pressure filter ---------------------------
+        # BOTH_SQUEEZE = premiums collapsing, don't buy options.
+        # PUT_DOMINANT blocks CALL; CALL_DOMINANT blocks PUT.
+        # WAIT (< 3 min of data) is treated as neutral — does not block.
+        if skip_reason is None:
+            verdict = self.state.pressure_verdict
+            if verdict == 'BOTH_SQUEEZE':
+                skip_reason = f"pressure={verdict} — all premiums falling, skip"
+            elif signal.direction == "CALL" and verdict == 'PUT_DOMINANT':
+                skip_reason = f"pressure={verdict} blocks CALL entry"
+            elif signal.direction == "PUT" and verdict == 'CALL_DOMINANT':
+                skip_reason = f"pressure={verdict} blocks PUT entry"
+
+        if skip_reason:
+            logger.info("Signal skipped — %s", skip_reason)
             trade = None
-            logger.info("Signal skipped — bias=%s does not confirm %s direction",
-                        bias, signal.direction)
+        else:
+            trade = self._execution_engine.try_open(signal, atm_ltp, signal.atm_symbol)
         acted_on = trade is not None
 
         await self._db.insert_signal({
@@ -426,6 +537,16 @@ class Engine:
         self._instrument_manager.update_option_ltp(tick.symbol, tick.ltp)
         if tick.symbol == imap.spot_symbol:
             self.state.spot_ltp = tick.ltp
+            # TWAP accumulator — reset at the start of each calendar day (IST)
+            today_ord = datetime.date.today().toordinal()
+            if today_ord != self._vwap_day:
+                self._vwap_sum = 0.0
+                self._vwap_count = 0
+                self._vwap_day = today_ord
+            self._vwap_sum += tick.ltp
+            self._vwap_count += 1
+            self.state.vwap = self._vwap_sum / self._vwap_count
+            self.state.above_vwap = tick.ltp > self.state.vwap
             # Live re-selection: if ATM/OTM has shifted within the grid, swap
             # the SignalEngine's active leg pointers — no WS reconnect needed.
             if self._instrument_manager.update_active_for_spot(tick.ltp):
@@ -444,6 +565,12 @@ class Engine:
                 )
         elif tick.symbol == imap.atm_call.symbol:
             self.state.atm_ltp = tick.ltp
+        elif tick.symbol == imap.atm_put.symbol:
+            self.state.atm_put_ltp = tick.ltp
+        elif imap.itm_call and tick.symbol == imap.itm_call.symbol:
+            self.state.itm_call_ltp = tick.ltp
+        elif imap.itm_put and tick.symbol == imap.itm_put.symbol:
+            self.state.itm_put_ltp = tick.ltp
         elif tick.symbol == imap.otm_call.symbol:
             self.state.otm_call_ltp = tick.ltp
         elif tick.symbol == imap.otm_put.symbol:
@@ -455,6 +582,35 @@ class Engine:
         except asyncio.QueueFull:
             pass
 
+    async def _minute_snapshot_loop(self) -> None:
+        """Every 60s, sample each leg's current LTP into a 15-slot ring buffer."""
+        def push(buf: list[float], val: float) -> None:
+            if val > 0:
+                buf.append(val)
+                if len(buf) > 15:
+                    del buf[0]
+
+        while True:
+            await asyncio.sleep(60.0)
+            push(self.state.itm_call_mins, self.state.itm_call_ltp)
+            push(self.state.atm_call_mins, self.state.atm_ltp)
+            push(self.state.otm_call_mins, self.state.otm_call_ltp)
+            push(self.state.otm_put_mins,  self.state.otm_put_ltp)
+            push(self.state.atm_put_mins,  self.state.atm_put_ltp)
+            push(self.state.itm_put_mins,  self.state.itm_put_ltp)
+            # Recompute composite verdict so _on_signal() always reads fresh value
+            call_g = _group_pressure([
+                _leg_pressure(self.state.itm_call_mins),
+                _leg_pressure(self.state.atm_call_mins),
+                _leg_pressure(self.state.otm_call_mins),
+            ])
+            put_g = _group_pressure([
+                _leg_pressure(self.state.otm_put_mins),
+                _leg_pressure(self.state.atm_put_mins),
+                _leg_pressure(self.state.itm_put_mins),
+            ])
+            self.state.pressure_verdict = _compute_pressure_verdict(call_g, put_g)
+
     async def _heartbeat(self) -> None:
         while True:
             self.state.last_heartbeat = time.time()
@@ -463,6 +619,9 @@ class Engine:
                 "engine_state":   self.state.engine_state.value,
                 "spot_ltp":       self.state.spot_ltp,
                 "atm_ltp":        self.state.atm_ltp,
+                "atm_put_ltp":    self.state.atm_put_ltp,
+                "itm_call_ltp":   self.state.itm_call_ltp,
+                "itm_put_ltp":    self.state.itm_put_ltp,
                 "otm_call_ltp":   self.state.otm_call_ltp,
                 "otm_put_ltp":    self.state.otm_put_ltp,
                 "capital":        self.state.capital,
@@ -472,7 +631,17 @@ class Engine:
                 "market_bias":    self.state.market_bias,
                 "spot_delta_5m":  self.state.spot_delta_5m,
                 "last_z_score":   self.state.last_z_score,
-                "last_ratio":     self.state.last_ratio,
+                "reconnect_count":    self.state.reconnect_count,
+                "last_ratio":         self.state.last_ratio,
+                "vwap":               self.state.vwap,
+                "above_vwap":         self.state.above_vwap,
+                "pressure_verdict":   self.state.pressure_verdict,
+                "itm_call_mins":  list(self.state.itm_call_mins),
+                "atm_call_mins":  list(self.state.atm_call_mins),
+                "otm_call_mins":  list(self.state.otm_call_mins),
+                "otm_put_mins":   list(self.state.otm_put_mins),
+                "atm_put_mins":   list(self.state.atm_put_mins),
+                "itm_put_mins":   list(self.state.itm_put_mins),
             })
             await asyncio.sleep(2.0)
 

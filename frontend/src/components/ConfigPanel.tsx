@@ -16,8 +16,7 @@ const EDITABLE: Array<{ section: string; key: string; label: string; type: 'numb
   { section: 'execution', key: 'trailing_stop_pct',             label: 'Trail floor %',           type: 'number', scale: 100 },
   { section: 'execution', key: 'cooldown_minutes',              label: 'Cooldown (min)',           type: 'number' },
   { section: 'execution', key: 'daily_drawdown_kill_pct',       label: 'Kill switch drawdown %',  type: 'number', scale: 100 },
-  { section: 'execution', key: 'morning_filter_start',          label: 'Morning start (HH:MM)',   type: 'text'   },
-  { section: 'execution', key: 'morning_filter_end',            label: 'Morning end (HH:MM)',     type: 'text'   },
+  { section: 'execution', key: 'last_entry_time',               label: 'Last entry time (HH:MM)', type: 'text'   },
 ]
 
 export function ConfigPanel() {
