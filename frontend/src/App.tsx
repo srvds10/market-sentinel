@@ -57,15 +57,17 @@ export default function App() {
   const [liveSignals, setLiveSignals] = useState<Signal[]>([])
   const [tab, setTab] = useState<'blotter' | 'config'>('blotter')
   const [serverStartedAt, setServerStartedAt] = useState<number>()
-  // Rolling price histories for option-pressure panel (15-min window at 2s heartbeat)
-  const [itmCallHist, setItmCallHist] = useState<number[]>([])
-  const [atmCallHist, setAtmCallHist] = useState<number[]>([])
-  const [otmCallHist, setOtmCallHist] = useState<number[]>([])
-  const [otmPutHist,  setOtmPutHist]  = useState<number[]>([])
-  const [atmPutHist,  setAtmPutHist]  = useState<number[]>([])
-  const [itmPutHist,  setItmPutHist]  = useState<number[]>([])
+  // Per-minute price snapshots for option-pressure panel (15-slot ring buffer)
+  const [itmCallMins, setItmCallMins] = useState<number[]>([])
+  const [atmCallMins, setAtmCallMins] = useState<number[]>([])
+  const [otmCallMins, setOtmCallMins] = useState<number[]>([])
+  const [otmPutMins,  setOtmPutMins]  = useState<number[]>([])
+  const [atmPutMins,  setAtmPutMins]  = useState<number[]>([])
+  const [itmPutMins,  setItmPutMins]  = useState<number[]>([])
   // Track server reconnect count so histories are wiped when the instrument grid changes
   const prevReconnectRef = useRef<number>(-1)
+  // Ref to latest status so the 60s interval can read current LTPs without re-subscribing
+  const statusRef = useRef<Partial<StatusPayload>>({})
 
   const { trades, refresh: refreshTrades } = useTrades(100)
   const { signals, refresh: refreshSignals } = useSignals(30)
@@ -84,25 +86,13 @@ export default function App() {
           [...prev, { t, pnl: msg.daily_pnl ?? 0 }].slice(-900)
         )
       }
-      // Clear all histories when the server reconnected (instrument grid may have changed)
+      // Clear all minute snapshots when the server reconnected (instrument grid may have changed)
       const rc = msg.reconnect_count ?? 0
       if (rc !== prevReconnectRef.current && prevReconnectRef.current !== -1) {
-        setItmCallHist([]); setAtmCallHist([]); setOtmCallHist([])
-        setOtmPutHist([]);  setAtmPutHist([]);  setItmPutHist([])
+        setItmCallMins([]); setAtmCallMins([]); setOtmCallMins([])
+        setOtmPutMins([]);  setAtmPutMins([]);  setItmPutMins([])
       }
       prevReconnectRef.current = rc
-
-      // Accumulate per-leg price histories (15-min window at 2s heartbeat = 450 ticks)
-      const push = (setter: (fn: (p: number[]) => number[]) => void, val: number | undefined) => {
-        if (val !== undefined && val !== null && val > 0)
-          setter(prev => [...prev, val].slice(-450))
-      }
-      push(setItmCallHist, msg.itm_call_ltp)
-      push(setAtmCallHist, msg.atm_ltp)
-      push(setOtmCallHist, msg.otm_call_ltp)
-      push(setOtmPutHist,  msg.otm_put_ltp)
-      push(setAtmPutHist,  msg.atm_put_ltp)
-      push(setItmPutHist,  msg.itm_put_ltp)
     } else if (msg.type === 'signal') {
       setLiveSignals(prev => [msg as Signal, ...prev].slice(0, 30))
       refreshSignals()
@@ -117,6 +107,26 @@ export default function App() {
   }, [refreshSignals, refreshTrades])
 
   const connected = useWebSocket(WS_URL, onMessage)
+
+  // Keep statusRef in sync so the interval below can read the latest LTPs
+  useEffect(() => { statusRef.current = status }, [status])
+
+  // Every 60s: snapshot the current LTP for each leg into the 15-slot ring buffer
+  useEffect(() => {
+    const id = setInterval(() => {
+      const s = statusRef.current
+      const snap = (setter: (fn: (p: number[]) => number[]) => void, val: number | undefined) => {
+        if (val && val > 0) setter(prev => [...prev, val].slice(-15))
+      }
+      snap(setItmCallMins, s.itm_call_ltp)
+      snap(setAtmCallMins, s.atm_ltp)
+      snap(setOtmCallMins, s.otm_call_ltp)
+      snap(setOtmPutMins,  s.otm_put_ltp)
+      snap(setAtmPutMins,  s.atm_put_ltp)
+      snap(setItmPutMins,  s.itm_put_ltp)
+    }, 60_000)
+    return () => clearInterval(id)
+  }, [])
 
   // On every (re)connect: pre-populate all status fields from the HTTP snapshot
   // so the UI shows real engine state immediately instead of blanks for 2s.
@@ -322,12 +332,12 @@ export default function App() {
             otmPutLtp ={status.otm_put_ltp   ?? 0}
             atmPutLtp ={status.atm_put_ltp   ?? 0}
             itmPutLtp ={status.itm_put_ltp   ?? 0}
-            itmCallHistory={itmCallHist}
-            atmCallHistory={atmCallHist}
-            otmCallHistory={otmCallHist}
-            otmPutHistory ={otmPutHist}
-            atmPutHistory ={atmPutHist}
-            itmPutHistory ={itmPutHist}
+            itmCallMins={itmCallMins}
+            atmCallMins={atmCallMins}
+            otmCallMins={otmCallMins}
+            otmPutMins ={otmPutMins}
+            atmPutMins ={atmPutMins}
+            itmPutMins ={itmPutMins}
           />
 
           {/* Open position */}
