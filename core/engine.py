@@ -483,6 +483,19 @@ class Engine:
                     f"VWAP {self.state.vwap:.0f}"
                 )
 
+        # --- Gate 3: option-premium pressure filter ---------------------------
+        # BOTH_SQUEEZE = premiums collapsing, don't buy options.
+        # PUT_DOMINANT blocks CALL; CALL_DOMINANT blocks PUT.
+        # WAIT (< 3 min of data) is treated as neutral — does not block.
+        if skip_reason is None:
+            verdict = self.state.pressure_verdict
+            if verdict == 'BOTH_SQUEEZE':
+                skip_reason = f"pressure={verdict} — all premiums falling, skip"
+            elif signal.direction == "CALL" and verdict == 'PUT_DOMINANT':
+                skip_reason = f"pressure={verdict} blocks CALL entry"
+            elif signal.direction == "PUT" and verdict == 'CALL_DOMINANT':
+                skip_reason = f"pressure={verdict} blocks PUT entry"
+
         # --- Gate 4: NIFTY heavyweight weighted score -------------------------
         # Requires majority weighted alignment with signal direction.
         # WAIT (no data yet) is treated as neutral — does not block.
@@ -503,19 +516,6 @@ class Engine:
                     f"heavyweight direction=BEARISH blocks CALL entry "
                     f"(score={self.state.heavyweight_score:.3f})"
                 )
-
-        # --- Gate 3: option-premium pressure filter ---------------------------
-        # BOTH_SQUEEZE = premiums collapsing, don't buy options.
-        # PUT_DOMINANT blocks CALL; CALL_DOMINANT blocks PUT.
-        # WAIT (< 3 min of data) is treated as neutral — does not block.
-        if skip_reason is None:
-            verdict = self.state.pressure_verdict
-            if verdict == 'BOTH_SQUEEZE':
-                skip_reason = f"pressure={verdict} — all premiums falling, skip"
-            elif signal.direction == "CALL" and verdict == 'PUT_DOMINANT':
-                skip_reason = f"pressure={verdict} blocks CALL entry"
-            elif signal.direction == "PUT" and verdict == 'CALL_DOMINANT':
-                skip_reason = f"pressure={verdict} blocks PUT entry"
 
         if skip_reason:
             logger.info("Signal skipped — %s", skip_reason)
@@ -616,8 +616,7 @@ class Engine:
         elif tick.symbol == imap.otm_put.symbol:
             self.state.otm_put_ltp = tick.ltp
         # Heavyweight equity tick (security_id-based routing)
-        if self._hw_tracker:
-            self._hw_tracker.on_tick(tick.security_id, tick.ltp)
+        if self._hw_tracker and self._hw_tracker.on_tick(tick.security_id, tick.ltp):
             snap = self._hw_tracker.snapshot()
             self.state.heavyweight_score     = snap["score"]
             self.state.heavyweight_direction = snap["direction"]
@@ -635,7 +634,10 @@ class Engine:
             csv_text = self._instrument_manager.cached_csv()
             if csv_text:
                 self._hw_tracker.resolve_from_scrip_master(csv_text)
-                # Trigger a WS reconnect so heavyweight instruments are subscribed
+                # Wait until warmup is done before triggering a WS reconnect —
+                # reconnecting mid-warmup resets the Z-score baseline.
+                while self.state.engine_state == EngineState.WARMING_UP:
+                    await asyncio.sleep(2.0)
                 self.state.reconnect_event.set()
                 return
             await asyncio.sleep(2.0)

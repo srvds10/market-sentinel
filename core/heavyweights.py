@@ -98,14 +98,14 @@ class HeavyweightTracker:
 
         for row in reader:
             inst = row.get("SEM_INSTRUMENT_NAME", "").strip()
-            if inst not in ("EQUITY", "EQ", ""):
+            if inst not in ("EQUITY", "EQ"):
                 continue
             sym = (row.get("SEM_TRADING_SYMBOL") or row.get("SM_SYMBOL_NAME", "")).strip().upper()
             seg = row.get("SEM_EXM_EXCH_ID", row.get("SEM_SEGMENT", "")).strip().upper()
             if sym not in self._by_symbol:
                 continue
             # Prefer the NSE exchange segment
-            if seg not in ("NSE", "1", "N", "E", ""):
+            if seg not in ("NSE", "1", "N", "E"):
                 continue
             sec_id = str(row.get("SEM_SMST_SECURITY_ID", "")).strip()
             if not sec_id:
@@ -131,10 +131,13 @@ class HeavyweightTracker:
     # Tick ingestion
     # ------------------------------------------------------------------
 
-    def on_tick(self, security_id: str, ltp: float) -> None:
+    def on_tick(self, security_id: str, ltp: float) -> bool:
+        """Returns True if the tick matched a tracked heavyweight."""
         stock = self._stocks.get(security_id)
         if stock:
             stock.on_tick(ltp)
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Score & direction
