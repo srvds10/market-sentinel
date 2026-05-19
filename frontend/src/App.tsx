@@ -3,6 +3,7 @@ import clsx from 'clsx'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 
 import { ZScoreGauge } from './components/ZScoreGauge'
+import { HeavyweightBar } from './components/HeavyweightBar'
 import { MarketBias } from './components/MarketBias'
 import { OptionPressure } from './components/OptionPressure'
 import { SignalFeed } from './components/SignalFeed'
@@ -301,6 +302,13 @@ export default function App() {
               </div>
             )}
           </div>
+
+          {/* Heavyweight score bar */}
+          <HeavyweightBar
+            score={status.heavyweight_score ?? null}
+            direction={status.heavyweight_direction ?? 'WAIT'}
+            stocks={status.heavyweight_stocks ?? []}
+          />
 
           {/* Option premium pressure */}
           <OptionPressure

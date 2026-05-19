@@ -340,6 +340,10 @@ class InstrumentManager:
                 | {s.symbol for s in self._current_map.all_calls}
                 | {s.symbol for s in self._current_map.all_puts})
 
+    def cached_csv(self) -> str | None:
+        """Return the cached scrip master CSV text, or None if not yet downloaded."""
+        return self._csv_cache
+
     def get_dhan_instruments(self) -> list:
         """Return DhanInstrument list for the WS client subscription.
 

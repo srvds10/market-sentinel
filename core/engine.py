@@ -31,6 +31,7 @@ import yaml
 
 from core.database import Database
 from core.execution import ExecutionConfig, ExecutionEngine, ExitReason
+from core.heavyweights import HeavyweightTracker
 from core.instruments import InstrumentManager
 from core.signal import SignalConfig, SignalEngine, SignalEvent, Tick
 from core.timeutil import is_weekday_ist, ist_minutes_now, now_ist
@@ -87,6 +88,11 @@ class AppState:
 
     # Current composite pressure verdict (updated every minute alongside *_mins)
     pressure_verdict: str = 'WAIT'
+
+    # NIFTY heavyweight weighted score
+    heavyweight_score: float | None = None
+    heavyweight_direction: str = 'WAIT'
+    heavyweight_stocks: list = field(default_factory=list)
 
     # Per-minute LTP snapshots for the Option Pressure panel (max 15 entries each)
     itm_call_mins: list[float] = field(default_factory=list)
@@ -238,6 +244,15 @@ class Engine:
         self._tick_csv_path: Path | None = None
         self._stale_tick_timeout: float = self._cfg["ws"].get("stale_tick_timeout_seconds", 15.0)
 
+        hw_cfg = self._cfg.get("heavyweights", {})
+        if hw_cfg.get("enabled", False) and hw_cfg.get("stocks"):
+            self._hw_tracker: HeavyweightTracker | None = HeavyweightTracker(
+                stocks=hw_cfg["stocks"],
+                threshold=hw_cfg.get("score_threshold", 0.20),
+            )
+        else:
+            self._hw_tracker = None
+
     # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
@@ -249,6 +264,10 @@ class Engine:
 
         self.state.capital = self._execution_engine.capital
         self.state.engine_state = EngineState.WARMING_UP
+
+        # Resolve heavyweight security IDs from scrip master (runs concurrently)
+        if self._hw_tracker:
+            asyncio.create_task(self._resolve_heavyweights(), name="hw_resolve")
 
         # Start background tasks
         tasks = [
@@ -464,6 +483,27 @@ class Engine:
                     f"VWAP {self.state.vwap:.0f}"
                 )
 
+        # --- Gate 4: NIFTY heavyweight weighted score -------------------------
+        # Requires majority weighted alignment with signal direction.
+        # WAIT (no data yet) is treated as neutral — does not block.
+        if skip_reason is None and self._hw_tracker:
+            hw_dir = self.state.heavyweight_direction
+            if hw_dir == 'NEUTRAL':
+                skip_reason = (
+                    f"heavyweight score={self.state.heavyweight_score:.3f} "
+                    f"is within neutral band — no clear market direction"
+                )
+            elif hw_dir == 'BULLISH' and signal.direction == 'PUT':
+                skip_reason = (
+                    f"heavyweight direction=BULLISH blocks PUT entry "
+                    f"(score={self.state.heavyweight_score:.3f})"
+                )
+            elif hw_dir == 'BEARISH' and signal.direction == 'CALL':
+                skip_reason = (
+                    f"heavyweight direction=BEARISH blocks CALL entry "
+                    f"(score={self.state.heavyweight_score:.3f})"
+                )
+
         # --- Gate 3: option-premium pressure filter ---------------------------
         # BOTH_SQUEEZE = premiums collapsing, don't buy options.
         # PUT_DOMINANT blocks CALL; CALL_DOMINANT blocks PUT.
@@ -575,12 +615,31 @@ class Engine:
             self.state.otm_call_ltp = tick.ltp
         elif tick.symbol == imap.otm_put.symbol:
             self.state.otm_put_ltp = tick.ltp
+        # Heavyweight equity tick (security_id-based routing)
+        if self._hw_tracker:
+            self._hw_tracker.on_tick(tick.security_id, tick.ltp)
+            snap = self._hw_tracker.snapshot()
+            self.state.heavyweight_score     = snap["score"]
+            self.state.heavyweight_direction = snap["direction"]
+            self.state.heavyweight_stocks    = snap["stocks"]
 
     async def _broadcast(self, msg: dict) -> None:
         try:
             self.state.broadcast_queue.put_nowait(msg)
         except asyncio.QueueFull:
             pass
+
+    async def _resolve_heavyweights(self) -> None:
+        """Wait for the scrip master to be downloaded, then resolve security IDs."""
+        for _ in range(30):          # up to 60s wait
+            csv_text = self._instrument_manager.cached_csv()
+            if csv_text:
+                self._hw_tracker.resolve_from_scrip_master(csv_text)
+                # Trigger a WS reconnect so heavyweight instruments are subscribed
+                self.state.reconnect_event.set()
+                return
+            await asyncio.sleep(2.0)
+        logger.warning("Heavyweight resolve timed out — scrip master not available yet")
 
     async def _minute_snapshot_loop(self) -> None:
         """Every 60s, sample each leg's current LTP into a 15-slot ring buffer."""
@@ -635,7 +694,10 @@ class Engine:
                 "last_ratio":         self.state.last_ratio,
                 "vwap":               self.state.vwap,
                 "above_vwap":         self.state.above_vwap,
-                "pressure_verdict":   self.state.pressure_verdict,
+                "pressure_verdict":       self.state.pressure_verdict,
+                "heavyweight_score":      self.state.heavyweight_score,
+                "heavyweight_direction":  self.state.heavyweight_direction,
+                "heavyweight_stocks":     self.state.heavyweight_stocks,
                 "itm_call_mins":  list(self.state.itm_call_mins),
                 "atm_call_mins":  list(self.state.atm_call_mins),
                 "otm_call_mins":  list(self.state.otm_call_mins),
@@ -658,12 +720,21 @@ class Engine:
         return (9 * 60 + 15) <= m <= (15 * 60 + 30)
 
     def _make_provider(self) -> TickProvider:
+        from core.ws_client import DhanInstrument
+
+        def _instrument_provider():
+            instruments = self._instrument_manager.get_dhan_instruments()
+            if self._hw_tracker:
+                for sec_id, seg in self._hw_tracker.dhan_instruments():
+                    instruments.append(DhanInstrument(sec_id, seg, f"HW-{sec_id}"))
+            return instruments
+
         dhan = self._cfg["dhan"]
         return DhanWSClient(
             queue=self._tick_queue,
             client_id=dhan.get("client_id", ""),
             access_token=dhan.get("access_token", ""),
-            instrument_provider=self._instrument_manager.get_dhan_instruments,
+            instrument_provider=_instrument_provider,
             reconnect_delay=self._cfg["ws"]["reconnect_delay_seconds"],
         )
 

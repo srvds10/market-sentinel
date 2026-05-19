@@ -29,6 +29,12 @@ export interface StatusPayload {
   vwap: number | null
   above_vwap: boolean | null
   pressure_verdict: string
+  heavyweight_score: number | null
+  heavyweight_direction: string
+  heavyweight_stocks: Array<{
+    symbol: string; ltp: number; vwap: number | null
+    above_vwap: boolean | null; weight: number
+  }>
   itm_call_mins: number[]
   atm_call_mins: number[]
   otm_call_mins: number[]

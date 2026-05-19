@@ -50,3 +50,18 @@ logging:
   tick_csv_dir: "data/ticks"
   db_path: "data/market_sentinel.db"
   log_path: "data/sentinel.log"
+
+heavyweights:
+  enabled: true
+  score_threshold: 0.20    # |score| < threshold → NEUTRAL (block trade)
+  stocks:
+    - { symbol: HDFCBANK,  weight: 11.5 }
+    - { symbol: RELIANCE,  weight:  9.5 }
+    - { symbol: ICICIBANK, weight:  7.5 }
+    - { symbol: INFY,      weight:  5.5 }
+    - { symbol: TCS,       weight:  4.0 }
+    - { symbol: LT,        weight:  3.5 }
+    - { symbol: KOTAKBANK, weight:  3.0 }
+    - { symbol: AXISBANK,  weight:  3.0 }
+    - { symbol: SBIN,      weight:  3.0 }
+    - { symbol: BAJFINANCE, weight: 2.5 }
