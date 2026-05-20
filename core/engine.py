@@ -640,6 +640,8 @@ class Engine:
 
     async def _resolve_heavyweights(self) -> None:
         """Wait for the scrip master to be downloaded, then resolve security IDs."""
+        if not self._hw_tracker:
+            return
         for _ in range(30):          # up to 60s wait
             csv_text = self._instrument_manager.cached_csv()
             if csv_text:
@@ -734,24 +736,33 @@ class Engine:
                     sec_id = str(
                         q.get("securityId") or q.get("security_id") or ""
                     ).strip()
-                    oi = int(
-                        q.get("OI") or q.get("oi") or q.get("openInterest") or 0
-                    )
+                    try:
+                        # Use float() first so scientific notation ("1.5e6") doesn't throw
+                        oi = int(float(
+                            q.get("OI") or q.get("oi") or q.get("openInterest") or 0
+                        ))
+                    except (ValueError, TypeError):
+                        oi = 0
                     is_call = id_map.get(sec_id)
                     if is_call is not None:
                         self._pcr_tracker.update(sec_id, oi, is_call)
 
                 snap = self._pcr_tracker.snapshot()
-                self.state.nifty_pcr     = snap["pcr"]
-                self.state.pcr_sentiment = snap["sentiment"]
-                self.state.pcr_call_oi   = snap["call_oi"]
-                self.state.pcr_put_oi    = snap["put_oi"]
-
-                logger.debug(
-                    "PCR: %.3f (%s)  call_oi=%d  put_oi=%d",
-                    snap["pcr"] or 0, snap["sentiment"],
-                    snap["call_oi"], snap["put_oi"],
-                )
+                # Only overwrite AppState when we received real OI data —
+                # all-zero responses (pre-open / data lag) must not clear
+                # good readings from the previous successful poll.
+                if snap["call_oi"] > 0 or snap["put_oi"] > 0:
+                    self.state.nifty_pcr     = snap["pcr"]
+                    self.state.pcr_sentiment = snap["sentiment"]
+                    self.state.pcr_call_oi   = snap["call_oi"]
+                    self.state.pcr_put_oi    = snap["put_oi"]
+                    logger.debug(
+                        "PCR: %.3f (%s)  call_oi=%d  put_oi=%d",
+                        snap["pcr"] or 0, snap["sentiment"],
+                        snap["call_oi"], snap["put_oi"],
+                    )
+                else:
+                    logger.debug("PCR poll: all OI values zero — keeping previous reading")
 
             except asyncio.CancelledError:
                 raise
