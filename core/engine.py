@@ -33,6 +33,7 @@ from core.database import Database
 from core.execution import ExecutionConfig, ExecutionEngine, ExitReason
 from core.heavyweights import HeavyweightTracker
 from core.instruments import InstrumentManager
+from core.pcr import PCRTracker
 from core.signal import SignalConfig, SignalEngine, SignalEvent, Tick
 from core.timeutil import is_weekday_ist, ist_minutes_now, now_ist
 from core.ws_client import DhanWSClient, TickProvider
@@ -93,6 +94,12 @@ class AppState:
     heavyweight_score: float | None = None
     heavyweight_direction: str = 'WAIT'
     heavyweight_stocks: list = field(default_factory=list)
+
+    # Put-Call Ratio (polled from Dhan quote API every 60s)
+    nifty_pcr: float | None = None
+    pcr_sentiment: str = 'WAIT'
+    pcr_call_oi: int = 0
+    pcr_put_oi: int = 0
 
     # Per-minute LTP snapshots for the Option Pressure panel (max 15 entries each)
     itm_call_mins: list[float] = field(default_factory=list)
@@ -253,6 +260,8 @@ class Engine:
         else:
             self._hw_tracker = None
 
+        self._pcr_tracker = PCRTracker()
+
     # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
@@ -275,6 +284,7 @@ class Engine:
             asyncio.create_task(self._tick_loop(), name="tick_loop"),
             asyncio.create_task(self._heartbeat(), name="heartbeat"),
             asyncio.create_task(self._minute_snapshot_loop(), name="minute_snapshots"),
+            asyncio.create_task(self._pcr_poll_loop(), name="pcr_poll"),
         ]
 
         try:
@@ -672,6 +682,82 @@ class Engine:
             ])
             self.state.pressure_verdict = _compute_pressure_verdict(call_g, put_g)
 
+    async def _pcr_poll_loop(self) -> None:
+        """Poll Dhan market quote API every 60s to compute PCR from option OI."""
+        import httpx
+
+        dhan = self._cfg["dhan"]
+        while True:
+            await asyncio.sleep(60.0)
+            imap = self._instrument_manager.current_map()
+            if imap is None:
+                continue
+
+            # Build security_id → is_call mapping from the current grid
+            id_map: dict[str, bool] = {}
+            for s in imap.all_calls:
+                if s.security_id:
+                    id_map[s.security_id] = True
+            for s in imap.all_puts:
+                if s.security_id:
+                    id_map[s.security_id] = False
+
+            if not id_map:
+                continue
+
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(
+                        "https://api.dhan.co/v2/marketfeed/quote",
+                        headers={
+                            "access-token":  dhan.get("access_token", ""),
+                            "client-id":     dhan.get("client_id", ""),
+                            "Content-Type":  "application/json",
+                        },
+                        json={"NSE_FNO": list(id_map.keys())},
+                    )
+
+                if not resp.is_success:
+                    logger.warning("PCR quote API: HTTP %s", resp.status_code)
+                    continue
+
+                body = resp.json()
+                # Dhan v2 response: {"status":"success","data":{"NSE_FNO":[{...}]}}
+                fno_list = (body.get("data") or {}).get("NSE_FNO") or []
+                if not fno_list:
+                    logger.debug("PCR quote API: empty NSE_FNO list — body keys=%s", list(body.keys()))
+                    continue
+
+                self._pcr_tracker.reset()
+                for q in fno_list:
+                    # Field names vary slightly across Dhan API versions
+                    sec_id = str(
+                        q.get("securityId") or q.get("security_id") or ""
+                    ).strip()
+                    oi = int(
+                        q.get("OI") or q.get("oi") or q.get("openInterest") or 0
+                    )
+                    is_call = id_map.get(sec_id)
+                    if is_call is not None:
+                        self._pcr_tracker.update(sec_id, oi, is_call)
+
+                snap = self._pcr_tracker.snapshot()
+                self.state.nifty_pcr     = snap["pcr"]
+                self.state.pcr_sentiment = snap["sentiment"]
+                self.state.pcr_call_oi   = snap["call_oi"]
+                self.state.pcr_put_oi    = snap["put_oi"]
+
+                logger.debug(
+                    "PCR: %.3f (%s)  call_oi=%d  put_oi=%d",
+                    snap["pcr"] or 0, snap["sentiment"],
+                    snap["call_oi"], snap["put_oi"],
+                )
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("PCR poll error: %s", exc)
+
     async def _heartbeat(self) -> None:
         while True:
             self.state.last_heartbeat = time.time()
@@ -700,6 +786,10 @@ class Engine:
                 "heavyweight_score":      self.state.heavyweight_score,
                 "heavyweight_direction":  self.state.heavyweight_direction,
                 "heavyweight_stocks":     self.state.heavyweight_stocks,
+                "nifty_pcr":             self.state.nifty_pcr,
+                "pcr_sentiment":         self.state.pcr_sentiment,
+                "pcr_call_oi":           self.state.pcr_call_oi,
+                "pcr_put_oi":            self.state.pcr_put_oi,
                 "itm_call_mins":  list(self.state.itm_call_mins),
                 "atm_call_mins":  list(self.state.atm_call_mins),
                 "otm_call_mins":  list(self.state.otm_call_mins),

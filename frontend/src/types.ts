@@ -35,6 +35,10 @@ export interface StatusPayload {
     symbol: string; ltp: number; vwap: number | null
     above_vwap: boolean | null; weight: number
   }>
+  nifty_pcr: number | null
+  pcr_sentiment: string
+  pcr_call_oi: number
+  pcr_put_oi: number
   itm_call_mins: number[]
   atm_call_mins: number[]
   otm_call_mins: number[]

@@ -4,6 +4,7 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceL
 
 import { ZScoreGauge } from './components/ZScoreGauge'
 import { HeavyweightBar } from './components/HeavyweightBar'
+import { PCRGauge } from './components/PCRGauge'
 import { MarketBias } from './components/MarketBias'
 import { OptionPressure } from './components/OptionPressure'
 import { SignalFeed } from './components/SignalFeed'
@@ -308,6 +309,14 @@ export default function App() {
             score={status.heavyweight_score ?? null}
             direction={status.heavyweight_direction ?? 'WAIT'}
             stocks={status.heavyweight_stocks ?? []}
+          />
+
+          {/* Put-Call Ratio */}
+          <PCRGauge
+            pcr={status.nifty_pcr ?? null}
+            sentiment={status.pcr_sentiment ?? 'WAIT'}
+            callOi={status.pcr_call_oi ?? 0}
+            putOi={status.pcr_put_oi ?? 0}
           />
 
           {/* Option premium pressure */}
