@@ -685,69 +685,84 @@ class Engine:
             self.state.pressure_verdict = _compute_pressure_verdict(call_g, put_g)
 
     async def _pcr_poll_loop(self) -> None:
-        """Poll NSE option chain API every 60s to compute NIFTY PCR from OI.
+        """Compute NIFTY PCR every 60s using Dhan intraday chart OI data.
 
-        NSE returns aggregate totOI for all CE and PE strikes in one call —
-        no per-strike parsing needed.  A session GET is required first so
-        NSE sets cookies; both requests share the same AsyncClient instance.
+        Calls POST /v2/charts/intraday with oi=True for every strike in the
+        current grid concurrently (asyncio.gather).  The last element of the
+        returned open_interest array is the most-recent-minute OI for that
+        strike.  Sums all call OI and all put OI separately → PCR.
         """
         import httpx
 
-        _HEADERS = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept":          "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer":         "https://www.nseindia.com/",
-            "Connection":      "keep-alive",
-        }
-        _SESSION_URL = "https://www.nseindia.com/"
-        _OC_URL      = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+        dhan = self._cfg["dhan"]
 
         while True:
             await asyncio.sleep(60.0)
+            imap = self._instrument_manager.current_map()
+            if imap is None:
+                continue
+
+            today = now_ist().strftime("%Y-%m-%d")
+            headers = {
+                "access-token":  dhan.get("access_token", ""),
+                "client-id":     dhan.get("client_id", ""),
+                "Content-Type":  "application/json",
+            }
+            strikes = (
+                [(s.security_id, True)  for s in imap.all_calls if s.security_id]
+              + [(s.security_id, False) for s in imap.all_puts  if s.security_id]
+            )
+            if not strikes:
+                continue
+
+            async def _fetch_oi(
+                sid: str, is_call: bool, client: httpx.AsyncClient
+            ) -> tuple[str, bool, int]:
+                try:
+                    r = await client.post(
+                        "https://api.dhan.co/v2/charts/intraday",
+                        headers=headers,
+                        json={
+                            "securityId":      sid,
+                            "exchangeSegment": "NSE_FNO",
+                            "instrument":      "OPTIDX",
+                            "interval":        "1",
+                            "oi":              True,
+                            "fromDate":        today,
+                            "toDate":          today,
+                        },
+                    )
+                    if r.is_success:
+                        oi_arr = r.json().get("open_interest") or []
+                        if oi_arr:
+                            return sid, is_call, int(float(oi_arr[-1]))
+                except Exception:
+                    pass
+                return sid, is_call, 0
+
             try:
-                async with httpx.AsyncClient(
-                    timeout=15.0, follow_redirects=True
-                ) as client:
-                    # Establish NSE session / get cookies
-                    await client.get(_SESSION_URL, headers=_HEADERS)
-                    # Fetch option chain
-                    resp = await client.get(_OC_URL, headers=_HEADERS)
-
-                if not resp.is_success:
-                    logger.warning("PCR NSE API: HTTP %s", resp.status_code)
-                    continue
-
-                body = resp.json()
-                filtered = body.get("filtered") or {}
-                ce_oi = int(float((filtered.get("CE") or {}).get("totOI") or 0))
-                pe_oi = int(float((filtered.get("PE") or {}).get("totOI") or 0))
-
-                if ce_oi == 0 and pe_oi == 0:
-                    logger.debug("PCR NSE API: both OI zero — keeping previous reading")
-                    continue
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    results = await asyncio.gather(
+                        *(_fetch_oi(sid, ic, client) for sid, ic in strikes)
+                    )
 
                 self._pcr_tracker.reset()
-                if ce_oi > 0:
-                    self._pcr_tracker.update("CE", ce_oi, is_call=True)
-                if pe_oi > 0:
-                    self._pcr_tracker.update("PE", pe_oi, is_call=False)
+                for sid, is_call, oi in results:
+                    self._pcr_tracker.update(sid, oi, is_call)
 
                 snap = self._pcr_tracker.snapshot()
-                self.state.nifty_pcr     = snap["pcr"]
-                self.state.pcr_sentiment = snap["sentiment"]
-                self.state.pcr_call_oi   = snap["call_oi"]
-                self.state.pcr_put_oi    = snap["put_oi"]
-                logger.info(
-                    "PCR: %.3f (%s)  call_oi=%s  put_oi=%s",
-                    snap["pcr"] or 0, snap["sentiment"],
-                    f"{ce_oi:,}", f"{pe_oi:,}",
-                )
+                if snap["call_oi"] > 0 or snap["put_oi"] > 0:
+                    self.state.nifty_pcr     = snap["pcr"]
+                    self.state.pcr_sentiment = snap["sentiment"]
+                    self.state.pcr_call_oi   = snap["call_oi"]
+                    self.state.pcr_put_oi    = snap["put_oi"]
+                    logger.info(
+                        "PCR: %.3f (%s)  call_oi=%s  put_oi=%s",
+                        snap["pcr"] or 0, snap["sentiment"],
+                        f"{snap['call_oi']:,}", f"{snap['put_oi']:,}",
+                    )
+                else:
+                    logger.debug("PCR poll: all OI zero — keeping previous reading")
 
             except asyncio.CancelledError:
                 raise
