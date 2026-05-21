@@ -25,7 +25,11 @@ export function PositionTracker({ trade, atm_call_ltp, atm_put_ltp }: Props) {
   }
 
   const current_ltp = trade.direction === 'CALL' ? atm_call_ltp : atm_put_ltp
-  const unreal_pnl = (current_ltp - trade.entry_price) * trade.qty * 50
+  // Derive lot_size from what was recorded at entry rather than hardcoding 50
+  const lot_size = (trade.entry_price > 0 && trade.qty > 0)
+    ? Math.round(trade.capital_at_risk / (trade.entry_price * trade.qty))
+    : 50
+  const unreal_pnl = (current_ltp - trade.entry_price) * trade.qty * lot_size
   const unreal_pct = trade.entry_price > 0
     ? (current_ltp - trade.entry_price) / trade.entry_price
     : 0
@@ -56,7 +60,7 @@ export function PositionTracker({ trade, atm_call_ltp, atm_put_ltp }: Props) {
         <div className="text-right">₹{fmt(current_ltp)}</div>
 
         <div className="text-muted">Qty × Lot</div>
-        <div className="text-right">{trade.qty} × 50 = {trade.qty * 50}</div>
+        <div className="text-right">{trade.qty} × {lot_size} = {trade.qty * lot_size}</div>
 
         <div className="text-muted">Stop Loss</div>
         <div className="text-right text-bear">₹{fmt(trade.stop_loss)}</div>

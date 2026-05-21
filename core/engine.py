@@ -409,9 +409,11 @@ class Engine:
                 await self._on_trade_close(closed)
 
             # Time stop check
-            atm_ltp = self.state.atm_ltp
-            if atm_ltp:
-                closed = self._execution_engine.check_time_stop(atm_ltp)
+            _open = self._execution_engine.open_trade
+            _exit_ltp = (self.state.atm_ltp if (_open and _open.direction == "CALL")
+                         else self.state.atm_put_ltp)
+            if _exit_ltp:
+                closed = self._execution_engine.check_time_stop(_exit_ltp)
                 if closed:
                     await self._on_trade_close(closed)
                     self.state.engine_state = EngineState.CLOSED
@@ -432,7 +434,8 @@ class Engine:
             if open_trade and signal is None:
                 current_z = self._signal_engine.current_z_score()
                 threshold = self._signal_engine.config.zscore_threshold
-                atm_ltp_now = self.state.atm_ltp
+                atm_ltp_now = (self.state.atm_ltp if open_trade.direction == "CALL"
+                               else self.state.atm_put_ltp)
                 min_hold = self._execution_engine.config.min_hold_minutes * 60.0
                 held_long_enough = (time.time() - open_trade.opened_at) >= min_hold
                 if (held_long_enough

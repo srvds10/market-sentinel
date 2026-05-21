@@ -36,7 +36,7 @@ class PCRTracker:
     def snapshot(self) -> dict:
         c = sum(self._call_oi.values())
         p = sum(self._put_oi.values())
-        val = (p / c) if c != 0 and p != 0 else None
+        val = (p / c) if c != 0 else None
         if val is None:
             sentiment = 'WAIT'
         elif val >= 1.2:
