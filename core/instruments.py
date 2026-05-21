@@ -535,6 +535,25 @@ class InstrumentManager:
         new_itm_call = itm_calls[0] if itm_calls else None
         new_itm_put  = itm_puts[0]  if itm_puts  else None
 
+        # If the grid no longer has coverage on both sides (spot drifted too far),
+        # trigger an immediate recalibration so the grid is rebuilt around new spot.
+        grid_adequate = (
+            new_itm_call is not None
+            and new_itm_put is not None
+            and len(otm_calls) >= 2
+            and len(otm_puts) >= 2
+        )
+        if not grid_adequate:
+            logger.warning(
+                "Grid edge reached (spot=%.0f  itm_call=%s  itm_put=%s  "
+                "otm_calls=%d  otm_puts=%d) — triggering recalibration",
+                spot,
+                new_itm_call.symbol if new_itm_call else "None",
+                new_itm_put.symbol  if new_itm_put  else "None",
+                len(otm_calls), len(otm_puts),
+            )
+            self._recalibrate_now.set()
+
         changed = (
             new_atm_call.security_id != imap.atm_call.security_id
             or new_atm_put.security_id  != imap.atm_put.security_id

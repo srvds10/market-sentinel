@@ -630,8 +630,14 @@ class Engine:
                 )
         elif tick.symbol == imap.atm_call.symbol:
             self.state.atm_ltp = tick.ltp
+            # OTM call collapses to same strike as ATM when grid is at edge
+            if imap.otm_call.symbol == imap.atm_call.symbol:
+                self.state.otm_call_ltp = tick.ltp
         elif tick.symbol == imap.atm_put.symbol:
             self.state.atm_put_ltp = tick.ltp
+            # OTM put collapses to same strike as ATM when grid is at edge
+            if imap.otm_put.symbol == imap.atm_put.symbol:
+                self.state.otm_put_ltp = tick.ltp
         elif imap.itm_call and tick.symbol == imap.itm_call.symbol:
             self.state.itm_call_ltp = tick.ltp
         elif imap.itm_put and tick.symbol == imap.itm_put.symbol:
