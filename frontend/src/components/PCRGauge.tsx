@@ -37,7 +37,7 @@ export function PCRGauge({ pcr, sentiment, callOi, putOi }: Props) {
         <div className="flex items-center gap-2">
           {pcr !== null && (
             <span className="text-muted text-[9px]">
-              PCR {pcr.toFixed(3)}
+              PCR {pcr.toFixed(2)}
             </span>
           )}
           <span className={clsx('text-[10px] font-bold', s.cls)}>{s.label}</span>

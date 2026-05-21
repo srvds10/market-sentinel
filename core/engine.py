@@ -22,7 +22,6 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -693,40 +692,21 @@ class Engine:
         strike.  Sums all call OI and all put OI separately → PCR.
         """
         import httpx
+        from itertools import zip_longest
 
         dhan = self._cfg["dhan"]
+        headers = {
+            "access-token":  dhan.get("access_token", ""),
+            "client-id":     dhan.get("client_id", ""),
+            "Content-Type":  "application/json",
+        }
+        # Limit concurrent requests to avoid Dhan rate-limit rejections
+        sem = asyncio.Semaphore(8)
 
-        while True:
-            await asyncio.sleep(60.0)
-            imap = self._instrument_manager.current_map()
-            if imap is None:
-                continue
-
-            today = now_ist().strftime("%Y-%m-%d")
-            headers = {
-                "access-token":  dhan.get("access_token", ""),
-                "client-id":     dhan.get("client_id", ""),
-                "Content-Type":  "application/json",
-            }
-            calls = [(s.security_id, True)  for s in imap.all_calls if s.security_id]
-            puts  = [(s.security_id, False) for s in imap.all_puts  if s.security_id]
-            # Interleave calls and puts so any rate-limit cut affects both equally
-            strikes: list[tuple[str, bool]] = []
-            for pair in zip(calls, puts):
-                strikes.extend(pair)
-            strikes.extend(calls[len(puts):])
-            strikes.extend(puts[len(calls):])
-            if not strikes:
-                continue
-
-            logger.debug(
-                "PCR poll: %d calls, %d puts → %d requests",
-                len(calls), len(puts), len(strikes),
-            )
-
-            async def _fetch_oi(
-                sid: str, is_call: bool, client: httpx.AsyncClient
-            ) -> tuple[str, bool, int]:
+        async def _fetch_oi(
+            sid: str, is_call: bool, client: httpx.AsyncClient, today: str
+        ) -> tuple[str, bool, int]:
+            async with sem:
                 try:
                     r = await client.post(
                         "https://api.dhan.co/v2/charts/intraday",
@@ -756,16 +736,34 @@ class Engine:
                             sid, is_call, r.status_code, r.text[:120],
                         )
                 except Exception as exc:
-                    logger.debug(
-                        "PCR fetch %s (call=%s): %r",
-                        sid, is_call, exc,
-                    )
-                return sid, is_call, 0
+                    logger.debug("PCR fetch %s (call=%s): %r", sid, is_call, exc)
+            return sid, is_call, 0
+
+        while True:
+            await asyncio.sleep(60.0)
+            imap = self._instrument_manager.current_map()
+            if imap is None:
+                continue
+
+            today = now_ist().strftime("%Y-%m-%d")
+            calls = [(s.security_id, True)  for s in imap.all_calls if s.security_id]
+            puts  = [(s.security_id, False) for s in imap.all_puts  if s.security_id]
+            # Interleave calls and puts so any rate-limit cut affects both equally
+            strikes = [
+                x for pair in zip_longest(calls, puts) for x in pair if x is not None
+            ]
+            if not strikes:
+                continue
+
+            logger.debug(
+                "PCR poll: %d calls, %d puts → %d requests",
+                len(calls), len(puts), len(strikes),
+            )
 
             try:
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     results = await asyncio.gather(
-                        *(_fetch_oi(sid, ic, client) for sid, ic in strikes)
+                        *(_fetch_oi(sid, ic, client, today) for sid, ic in strikes)
                     )
 
                 self._pcr_tracker.reset()
@@ -780,7 +778,8 @@ class Engine:
                     self.state.pcr_put_oi    = snap["put_oi"]
                     logger.info(
                         "PCR: %.3f (%s)  call_oi=%s  put_oi=%s",
-                        snap["pcr"] or 0, snap["sentiment"],
+                        snap["pcr"] if snap["pcr"] is not None else 0.0,
+                        snap["sentiment"],
                         f"{snap['call_oi']:,}", f"{snap['put_oi']:,}",
                     )
                 else:
@@ -869,7 +868,7 @@ class Engine:
 
     def _open_tick_csv(self) -> None:
         tick_dir = Path(self._cfg["logging"]["tick_csv_dir"])
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = now_ist().strftime("%Y-%m-%d")
         self._tick_csv_path = tick_dir / f"ticks_{date_str}.csv"
         if not self._tick_csv_path.exists():
             with open(self._tick_csv_path, "w", newline="") as f:

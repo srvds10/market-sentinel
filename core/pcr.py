@@ -33,36 +33,21 @@ class PCRTracker:
         else:
             self._put_oi[security_id] = oi
 
-    @property
-    def total_call_oi(self) -> int:
-        return sum(self._call_oi.values())
-
-    @property
-    def total_put_oi(self) -> int:
-        return sum(self._put_oi.values())
-
-    def pcr(self) -> float | None:
-        c = self.total_call_oi
-        p = self.total_put_oi
-        if c == 0 or p == 0:
-            return None
-        return p / c
-
-    def sentiment(self) -> str:
-        val = self.pcr()
-        if val is None:
-            return 'WAIT'
-        if val >= 1.2:
-            return 'PUT_HEAVY'
-        if val <= 0.8:
-            return 'CALL_HEAVY'
-        return 'BALANCED'
-
     def snapshot(self) -> dict:
-        val = self.pcr()
+        c = sum(self._call_oi.values())
+        p = sum(self._put_oi.values())
+        val = (p / c) if c != 0 and p != 0 else None
+        if val is None:
+            sentiment = 'WAIT'
+        elif val >= 1.2:
+            sentiment = 'PUT_HEAVY'
+        elif val <= 0.8:
+            sentiment = 'CALL_HEAVY'
+        else:
+            sentiment = 'BALANCED'
         return {
-            'pcr':      round(val, 3) if val is not None else None,
-            'sentiment': self.sentiment(),
-            'call_oi':  self.total_call_oi,
-            'put_oi':   self.total_put_oi,
+            'pcr':       round(val, 3) if val is not None else None,
+            'sentiment': sentiment,
+            'call_oi':   c,
+            'put_oi':    p,
         }
