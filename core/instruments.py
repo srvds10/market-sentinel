@@ -695,7 +695,7 @@ class InstrumentManager:
                     if closes:
                         return float(closes[-1])
         except Exception as e:
-            logger.warning("Spot fetch via chart API failed: %s", e)
+            logger.warning("Spot fetch via chart API failed: %s", repr(e))
 
         logger.warning("Could not get live spot — using fallback; will recalibrate after first tick")
         return 24500.0
