@@ -724,10 +724,24 @@ class Engine:
                     continue
 
                 body = resp.json()
-                # Dhan v2 response: {"status":"success","data":{"NSE_FNO":[{...}]}}
-                fno_list = (body.get("data") or {}).get("NSE_FNO") or []
-                if not fno_list:
-                    logger.debug("PCR quote API: empty NSE_FNO list — body keys=%s", list(body.keys()))
+                # Dhan v2 response: {"status":"success","data":{"NSE_FNO": ...}}
+                # NSE_FNO may be a list [{securityId, OI, ...}] or a dict
+                # {secId: {OI, ...}} depending on the API version.
+                fno_raw = (body.get("data") or {}).get("NSE_FNO")
+                if not fno_raw:
+                    logger.warning(
+                        "PCR quote API: empty NSE_FNO — body keys=%s  status=%s",
+                        list(body.keys()), body.get("status"),
+                    )
+                    continue
+
+                if isinstance(fno_raw, dict):
+                    # {secId: {"OI": 500000, ...}} — normalise to list
+                    fno_list = [{"securityId": k, **v} for k, v in fno_raw.items()]
+                elif isinstance(fno_raw, list):
+                    fno_list = fno_raw
+                else:
+                    logger.warning("PCR quote API: unexpected NSE_FNO type %s", type(fno_raw).__name__)
                     continue
 
                 self._pcr_tracker.reset()
