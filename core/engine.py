@@ -527,19 +527,17 @@ class Engine:
                 )
 
         # --- Gate 5: NIFTY PCR sentiment filter ----------------------------------
-        # PUT_HEAVY market = bearish positioning → blocks CALL entries.
-        # CALL_HEAVY market = bullish positioning → blocks PUT entries.
-        # WAIT / BALANCED is treated as neutral — does not block.
+        # Only PUT_HEAVY allows PUT; only CALL_HEAVY allows CALL.
+        # WAIT (no data yet) and BALANCED both block all entries.
         if skip_reason is None:
             pcr_sent = self.state.pcr_sentiment
-            if pcr_sent == 'PUT_HEAVY' and signal.direction == 'CALL':
-                skip_reason = (
-                    f"PCR={self.state.nifty_pcr:.3f} ({pcr_sent}) blocks CALL entry"
-                )
+            pcr_val  = f"{self.state.nifty_pcr:.3f}" if self.state.nifty_pcr is not None else "n/a"
+            if pcr_sent in ('WAIT', 'BALANCED'):
+                skip_reason = f"PCR={pcr_val} ({pcr_sent}) — no clear OI bias, skip"
+            elif pcr_sent == 'PUT_HEAVY' and signal.direction == 'CALL':
+                skip_reason = f"PCR={pcr_val} ({pcr_sent}) blocks CALL entry"
             elif pcr_sent == 'CALL_HEAVY' and signal.direction == 'PUT':
-                skip_reason = (
-                    f"PCR={self.state.nifty_pcr:.3f} ({pcr_sent}) blocks PUT entry"
-                )
+                skip_reason = f"PCR={pcr_val} ({pcr_sent}) blocks PUT entry"
 
         if skip_reason:
             logger.info("Signal skipped — %s", skip_reason)
