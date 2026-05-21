@@ -685,103 +685,74 @@ class Engine:
             self.state.pressure_verdict = _compute_pressure_verdict(call_g, put_g)
 
     async def _pcr_poll_loop(self) -> None:
-        """Poll Dhan market quote API every 60s to compute PCR from option OI."""
+        """Poll NSE option chain API every 60s to compute NIFTY PCR from OI.
+
+        NSE returns aggregate totOI for all CE and PE strikes in one call —
+        no per-strike parsing needed.  A session GET is required first so
+        NSE sets cookies; both requests share the same AsyncClient instance.
+        """
         import httpx
 
-        dhan = self._cfg["dhan"]
+        _HEADERS = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept":          "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer":         "https://www.nseindia.com/",
+            "Connection":      "keep-alive",
+        }
+        _SESSION_URL = "https://www.nseindia.com/"
+        _OC_URL      = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+
         while True:
             await asyncio.sleep(60.0)
-            imap = self._instrument_manager.current_map()
-            if imap is None:
-                continue
-
-            # Build security_id → is_call mapping from the current grid
-            id_map: dict[str, bool] = {}
-            for s in imap.all_calls:
-                if s.security_id:
-                    id_map[s.security_id] = True
-            for s in imap.all_puts:
-                if s.security_id:
-                    id_map[s.security_id] = False
-
-            if not id_map:
-                continue
-
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.post(
-                        "https://api.dhan.co/v2/marketfeed/quote",
-                        headers={
-                            "access-token":  dhan.get("access_token", ""),
-                            "client-id":     dhan.get("client_id", ""),
-                            "Content-Type":  "application/json",
-                        },
-                        json={"NSE_FNO": list(id_map.keys())},
-                    )
+                async with httpx.AsyncClient(
+                    timeout=15.0, follow_redirects=True
+                ) as client:
+                    # Establish NSE session / get cookies
+                    await client.get(_SESSION_URL, headers=_HEADERS)
+                    # Fetch option chain
+                    resp = await client.get(_OC_URL, headers=_HEADERS)
 
                 if not resp.is_success:
-                    logger.warning("PCR quote API: HTTP %s", resp.status_code)
+                    logger.warning("PCR NSE API: HTTP %s", resp.status_code)
                     continue
 
                 body = resp.json()
-                # Dhan v2 response: {"status":"success","data":{"NSE_FNO": ...}}
-                # NSE_FNO may be a list [{securityId, OI, ...}] or a dict
-                # {secId: {OI, ...}} depending on the API version.
-                fno_raw = (body.get("data") or {}).get("NSE_FNO")
-                if not fno_raw:
-                    logger.warning(
-                        "PCR quote API: empty NSE_FNO — body keys=%s  status=%s",
-                        list(body.keys()), body.get("status"),
-                    )
-                    continue
+                filtered = body.get("filtered") or {}
+                ce_oi = int(float((filtered.get("CE") or {}).get("totOI") or 0))
+                pe_oi = int(float((filtered.get("PE") or {}).get("totOI") or 0))
 
-                if isinstance(fno_raw, dict):
-                    # {secId: {"OI": 500000, ...}} — normalise to list
-                    fno_list = [{"securityId": k, **v} for k, v in fno_raw.items()]
-                elif isinstance(fno_raw, list):
-                    fno_list = fno_raw
-                else:
-                    logger.warning("PCR quote API: unexpected NSE_FNO type %s", type(fno_raw).__name__)
+                if ce_oi == 0 and pe_oi == 0:
+                    logger.debug("PCR NSE API: both OI zero — keeping previous reading")
                     continue
 
                 self._pcr_tracker.reset()
-                for q in fno_list:
-                    # Field names vary slightly across Dhan API versions
-                    sec_id = str(
-                        q.get("securityId") or q.get("security_id") or ""
-                    ).strip()
-                    try:
-                        # Use float() first so scientific notation ("1.5e6") doesn't throw
-                        oi = int(float(
-                            q.get("OI") or q.get("oi") or q.get("openInterest") or 0
-                        ))
-                    except (ValueError, TypeError):
-                        oi = 0
-                    is_call = id_map.get(sec_id)
-                    if is_call is not None:
-                        self._pcr_tracker.update(sec_id, oi, is_call)
+                if ce_oi > 0:
+                    self._pcr_tracker.update("CE", ce_oi, is_call=True)
+                if pe_oi > 0:
+                    self._pcr_tracker.update("PE", pe_oi, is_call=False)
 
                 snap = self._pcr_tracker.snapshot()
-                # Only overwrite AppState when we received real OI data —
-                # all-zero responses (pre-open / data lag) must not clear
-                # good readings from the previous successful poll.
-                if snap["call_oi"] > 0 or snap["put_oi"] > 0:
-                    self.state.nifty_pcr     = snap["pcr"]
-                    self.state.pcr_sentiment = snap["sentiment"]
-                    self.state.pcr_call_oi   = snap["call_oi"]
-                    self.state.pcr_put_oi    = snap["put_oi"]
-                    logger.debug(
-                        "PCR: %.3f (%s)  call_oi=%d  put_oi=%d",
-                        snap["pcr"] or 0, snap["sentiment"],
-                        snap["call_oi"], snap["put_oi"],
-                    )
-                else:
-                    logger.debug("PCR poll: all OI values zero — keeping previous reading")
+                self.state.nifty_pcr     = snap["pcr"]
+                self.state.pcr_sentiment = snap["sentiment"]
+                self.state.pcr_call_oi   = snap["call_oi"]
+                self.state.pcr_put_oi    = snap["put_oi"]
+                logger.info(
+                    "PCR: %.3f (%s)  call_oi=%s  put_oi=%s",
+                    snap["pcr"] or 0, snap["sentiment"],
+                    f"{ce_oi:,}", f"{pe_oi:,}",
+                )
 
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("PCR poll error: %s", exc)
+                logger.warning("PCR poll error: %s", repr(exc))
 
     async def _heartbeat(self) -> None:
         while True:
