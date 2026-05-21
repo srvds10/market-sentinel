@@ -708,12 +708,21 @@ class Engine:
                 "client-id":     dhan.get("client_id", ""),
                 "Content-Type":  "application/json",
             }
-            strikes = (
-                [(s.security_id, True)  for s in imap.all_calls if s.security_id]
-              + [(s.security_id, False) for s in imap.all_puts  if s.security_id]
-            )
+            calls = [(s.security_id, True)  for s in imap.all_calls if s.security_id]
+            puts  = [(s.security_id, False) for s in imap.all_puts  if s.security_id]
+            # Interleave calls and puts so any rate-limit cut affects both equally
+            strikes: list[tuple[str, bool]] = []
+            for pair in zip(calls, puts):
+                strikes.extend(pair)
+            strikes.extend(calls[len(puts):])
+            strikes.extend(puts[len(calls):])
             if not strikes:
                 continue
+
+            logger.debug(
+                "PCR poll: %d calls, %d puts → %d requests",
+                len(calls), len(puts), len(strikes),
+            )
 
             async def _fetch_oi(
                 sid: str, is_call: bool, client: httpx.AsyncClient
@@ -733,11 +742,24 @@ class Engine:
                         },
                     )
                     if r.is_success:
-                        oi_arr = r.json().get("open_interest") or []
+                        body = r.json()
+                        oi_arr = body.get("open_interest") or []
                         if oi_arr:
                             return sid, is_call, int(float(oi_arr[-1]))
-                except Exception:
-                    pass
+                        logger.debug(
+                            "PCR fetch %s (call=%s): empty OI, keys=%s",
+                            sid, is_call, list(body.keys()),
+                        )
+                    else:
+                        logger.debug(
+                            "PCR fetch %s (call=%s): HTTP %s — %s",
+                            sid, is_call, r.status_code, r.text[:120],
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        "PCR fetch %s (call=%s): %r",
+                        sid, is_call, exc,
+                    )
                 return sid, is_call, 0
 
             try:
