@@ -797,11 +797,18 @@ class Engine:
                         *(_fetch_oi(sid, ic, client, today) for sid, ic in strikes)
                     )
 
-                # Detect all-401 batch (token rejected by REST API)
-                all_zero = all(oi == 0 for _, _, oi in results)
-                if all_zero:
+                # Require both sides to have OI before updating state.
+                # If one side is all-zero (partial 401 or illiquid), treat the
+                # whole batch as failed to keep the previous reading consistent.
+                call_total = sum(oi for _, ic, oi in results if ic)
+                put_total  = sum(oi for _, ic, oi in results if not ic)
+                if call_total == 0 or put_total == 0:
                     consecutive_auth_failures += 1
-                    logger.debug("PCR poll: all responses zero (consecutive=%d)", consecutive_auth_failures)
+                    logger.debug(
+                        "PCR poll: one-sided result (call_oi=%s  put_oi=%s) — "
+                        "keeping previous reading (consecutive=%d)",
+                        f"{call_total:,}", f"{put_total:,}", consecutive_auth_failures,
+                    )
                     continue
                 consecutive_auth_failures = 0
 
@@ -810,7 +817,7 @@ class Engine:
                     self._pcr_tracker.update(sid, oi, is_call)
 
                 snap = self._pcr_tracker.snapshot()
-                if snap["call_oi"] > 0 or snap["put_oi"] > 0:
+                if snap["call_oi"] > 0 and snap["put_oi"] > 0:
                     self.state.nifty_pcr     = snap["pcr"]
                     self.state.pcr_sentiment = snap["sentiment"]
                     self.state.pcr_call_oi   = snap["call_oi"]
