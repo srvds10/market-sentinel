@@ -159,6 +159,7 @@ class SignalEngine:
         self._bias_otm_call_symbols: list[str] = []
         self._bias_otm_put_symbols:  list[str] = []
         self._last_z_score: float | None = None
+        self._last_ratio:   float | None = None
 
     def reset(self) -> None:
         """Clear rolling-window data and Z-score history after a feed gap.
@@ -180,6 +181,7 @@ class SignalEngine:
             for sym in self._bias_windows
         }
         self._last_z_score = None
+        self._last_ratio   = None
 
     # ------------------------------------------------------------------
     # Instrument map wiring
@@ -312,6 +314,7 @@ class SignalEngine:
         self._zscore.push(ratio, ts)
         z = self._zscore.zscore(ratio)
         self._last_z_score = z
+        self._last_ratio = ratio
 
         if z is None or z < self.config.zscore_threshold:
             return None
@@ -402,6 +405,9 @@ class SignalEngine:
 
     def current_z_score(self) -> float | None:
         return self._last_z_score
+
+    def current_ratio(self) -> float | None:
+        return self._last_ratio
 
     def latest_spot(self) -> float | None:
         win = self._windows.get(self._spot_symbol)

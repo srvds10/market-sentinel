@@ -248,6 +248,7 @@ class Engine:
 
         self._warmup_seconds: float = self._cfg["ws"]["warmup_seconds"]
         self._tick_csv_path: Path | None = None
+        self._tick_csv_fh: object = None  # open file handle kept alive between ticks
         self._stale_tick_timeout: float = self._cfg["ws"].get("stale_tick_timeout_seconds", 15.0)
 
         hw_cfg = self._cfg.get("heavyweights", {})
@@ -273,10 +274,6 @@ class Engine:
         self.state.capital = self._execution_engine.capital
         self.state.engine_state = EngineState.WARMING_UP
 
-        # Resolve heavyweight security IDs from scrip master (runs concurrently)
-        if self._hw_tracker:
-            asyncio.create_task(self._resolve_heavyweights(), name="hw_resolve")
-
         # Start background tasks
         tasks = [
             asyncio.create_task(self._instrument_manager.run(), name="instruments"),
@@ -285,6 +282,10 @@ class Engine:
             asyncio.create_task(self._minute_snapshot_loop(), name="minute_snapshots"),
             asyncio.create_task(self._pcr_poll_loop(), name="pcr_poll"),
         ]
+        # Heavyweight resolver runs concurrently and must be tracked so its
+        # exceptions surface and it gets cancelled on shutdown.
+        if self._hw_tracker:
+            tasks.append(asyncio.create_task(self._resolve_heavyweights(), name="hw_resolve"))
 
         try:
             await asyncio.gather(*tasks)
@@ -384,7 +385,8 @@ class Engine:
             # Feed signal engine every tick so Z-score baseline builds during warmup
             signal_candidate: SignalEvent | None = self._signal_engine.on_tick(tick)
             self.state.z_sample_count = self._signal_engine.z_score_sample_count()
-            self.state.last_z_score = self._signal_engine.current_z_score()
+            self.state.last_z_score   = self._signal_engine.current_z_score()
+            self.state.last_ratio     = self._signal_engine.current_ratio()
             bias, delta_5m = self._signal_engine.market_bias()
             self.state.market_bias   = bias
             self.state.spot_delta_5m = delta_5m
@@ -913,18 +915,25 @@ class Engine:
     # ------------------------------------------------------------------
 
     def _open_tick_csv(self) -> None:
+        if self._tick_csv_fh is not None:
+            try:
+                self._tick_csv_fh.close()
+            except OSError:
+                pass
+            self._tick_csv_fh = None
         tick_dir = Path(self._cfg["logging"]["tick_csv_dir"])
         date_str = now_ist().strftime("%Y-%m-%d")
         self._tick_csv_path = tick_dir / f"ticks_{date_str}.csv"
-        if not self._tick_csv_path.exists():
-            with open(self._tick_csv_path, "w", newline="") as f:
-                csv.writer(f).writerow(["timestamp", "symbol", "ltp"])
+        write_header = not self._tick_csv_path.exists()
+        self._tick_csv_fh = open(self._tick_csv_path, "a", newline="")  # noqa: SIM115
+        if write_header:
+            csv.writer(self._tick_csv_fh).writerow(["timestamp", "symbol", "ltp"])
+            self._tick_csv_fh.flush()
 
     def _log_tick_csv(self, tick: Tick) -> None:
-        if self._tick_csv_path is None:
+        if self._tick_csv_fh is None:
             return
         try:
-            with open(self._tick_csv_path, "a", newline="") as f:
-                csv.writer(f).writerow([tick.timestamp, tick.symbol, tick.ltp])
+            csv.writer(self._tick_csv_fh).writerow([tick.timestamp, tick.symbol, tick.ltp])
         except OSError:
             pass

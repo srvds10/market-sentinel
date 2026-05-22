@@ -62,17 +62,25 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             await asyncio.sleep(PING_INTERVAL)
             await websocket.send_text(json.dumps({"type": "ping"}))
 
+    async def receive_loop() -> None:
+        try:
+            while True:
+                await websocket.receive_text()
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+
     sender_task = asyncio.create_task(sender())
     pinger_task = asyncio.create_task(pinger())
+    recv_task   = asyncio.create_task(receive_loop())
     try:
-        # Keep reading so we detect disconnects promptly
-        while True:
-            await websocket.receive_text()
-    except (WebSocketDisconnect, RuntimeError):
-        pass
+        # Exit as soon as any task ends (disconnect, send error, or ping error)
+        done, pending = await asyncio.wait(
+            {sender_task, pinger_task, recv_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
     finally:
-        sender_task.cancel()
-        pinger_task.cancel()
+        for t in (sender_task, pinger_task, recv_task):
+            t.cancel()
         manager.unsubscribe(q)
 
 

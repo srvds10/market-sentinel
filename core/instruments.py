@@ -16,6 +16,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from core.timeutil import now_ist
 from typing import Callable, Optional
 
 import httpx
@@ -390,7 +391,7 @@ class InstrumentManager:
         fallback spot source when the WebSocket hasn't connected yet.
         If we have a current_map already, we reuse its spot_ltp.
         """
-        today = date.today()
+        today = now_ist().date()
         if self._csv_cache and self._csv_cache_date == today:
             csv_text = self._csv_cache
             logger.debug("Scrip master: using cached CSV for %s", today)
@@ -711,8 +712,8 @@ class InstrumentManager:
                         "exchangeSegment": "IDX_I",
                         "instrument":      "INDEX",
                         "interval":        "1",
-                        "fromDate":        date.today().strftime("%Y-%m-%d"),
-                        "toDate":          date.today().strftime("%Y-%m-%d"),
+                        "fromDate":        now_ist().strftime("%Y-%m-%d"),
+                        "toDate":          now_ist().strftime("%Y-%m-%d"),
                     },
                 )
                 if resp.is_success:

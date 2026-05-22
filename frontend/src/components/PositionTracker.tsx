@@ -26,7 +26,7 @@ export function PositionTracker({ trade, atm_call_ltp, atm_put_ltp }: Props) {
 
   const current_ltp = trade.direction === 'CALL' ? atm_call_ltp : atm_put_ltp
   // Derive lot_size from what was recorded at entry rather than hardcoding 50
-  const lot_size = (trade.entry_price > 0 && trade.qty > 0)
+  const lot_size = (trade.entry_price > 0 && trade.qty > 0 && trade.capital_at_risk > 0)
     ? Math.round(trade.capital_at_risk / (trade.entry_price * trade.qty))
     : 50
   const unreal_pnl = (current_ltp - trade.entry_price) * trade.qty * lot_size
