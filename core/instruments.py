@@ -214,6 +214,9 @@ class InstrumentManager:
         self._strike_index: dict[str, OptionStrike] = {}
         # Most recent spot price, updated by the engine on every spot tick
         self._current_spot: float = 0.0
+        # Monotonic timestamp of the last grid-edge recalibration trigger;
+        # guards against re-firing on every tick while spot is near the edge.
+        self._last_edge_recal: float = 0.0
 
     def update_token(self, token: str) -> None:
         """Hot-update the access token and trigger immediate recalibration."""
@@ -429,13 +432,13 @@ class InstrumentManager:
         for s in calls + puts:
             s.delta = round(bs_delta(spot, s.strike_price, T, FALLBACK_SIGMA, s.is_call), 4)
 
-        # Build the grid: 13 calls (2 ITM + ATM + 10 OTM) and 13 puts.
+        # Build the grid: 15 calls (4 ITM + ATM + 10 OTM) and 15 puts.
         #   call ITM  → strike < spot
         #   call OTM  → strike > spot
         #   put  ITM  → strike > spot
         #   put  OTM  → strike < spot
-        call_strikes_wanted = {atm_strike + step * i for i in range(-2, 11)}
-        put_strikes_wanted  = {atm_strike + step * i for i in range(-10, 3)}
+        call_strikes_wanted = {atm_strike + step * i for i in range(-4, 11)}
+        put_strikes_wanted  = {atm_strike + step * i for i in range(-10, 5)}
 
         all_calls = sorted(
             [c for c in calls if c.strike_price in call_strikes_wanted],
@@ -536,7 +539,8 @@ class InstrumentManager:
         new_itm_put  = itm_puts[0]  if itm_puts  else None
 
         # If the grid no longer has coverage on both sides (spot drifted too far),
-        # trigger an immediate recalibration so the grid is rebuilt around new spot.
+        # trigger a recalibration — but debounce to at most once per 90 seconds so
+        # rapid spot oscillation near the grid edge doesn't cause a reconnect loop.
         grid_adequate = (
             new_itm_call is not None
             and new_itm_put is not None
@@ -544,15 +548,18 @@ class InstrumentManager:
             and len(otm_puts) >= 2
         )
         if not grid_adequate:
-            logger.warning(
-                "Grid edge reached (spot=%.0f  itm_call=%s  itm_put=%s  "
-                "otm_calls=%d  otm_puts=%d) — triggering recalibration",
-                spot,
-                new_itm_call.symbol if new_itm_call else "None",
-                new_itm_put.symbol  if new_itm_put  else "None",
-                len(otm_calls), len(otm_puts),
-            )
-            self._recalibrate_now.set()
+            now_mono = time.monotonic()
+            if now_mono - self._last_edge_recal >= 90.0:
+                self._last_edge_recal = now_mono
+                logger.warning(
+                    "Grid edge reached (spot=%.0f  itm_call=%s  itm_put=%s  "
+                    "otm_calls=%d  otm_puts=%d) — triggering recalibration",
+                    spot,
+                    new_itm_call.symbol if new_itm_call else "None",
+                    new_itm_put.symbol  if new_itm_put  else "None",
+                    len(otm_calls), len(otm_puts),
+                )
+                self._recalibrate_now.set()
 
         changed = (
             new_atm_call.security_id != imap.atm_call.security_id

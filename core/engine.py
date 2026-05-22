@@ -761,8 +761,17 @@ class Engine:
                     logger.debug("PCR fetch %s (call=%s): %r", sid, is_call, exc)
             return sid, is_call, 0
 
+        consecutive_auth_failures = 0
+
         while True:
-            await asyncio.sleep(60.0)
+            # After repeated 401s, back off to 10 minutes to avoid hammering Dhan
+            sleep_secs = 600.0 if consecutive_auth_failures >= 2 else 60.0
+            if consecutive_auth_failures >= 2:
+                logger.warning(
+                    "PCR poll: %d consecutive 401s — backing off to 10 min",
+                    consecutive_auth_failures,
+                )
+            await asyncio.sleep(sleep_secs)
             imap = self._instrument_manager.current_map()
             if imap is None:
                 continue
@@ -787,6 +796,14 @@ class Engine:
                     results = await asyncio.gather(
                         *(_fetch_oi(sid, ic, client, today) for sid, ic in strikes)
                     )
+
+                # Detect all-401 batch (token rejected by REST API)
+                all_zero = all(oi == 0 for _, _, oi in results)
+                if all_zero:
+                    consecutive_auth_failures += 1
+                    logger.debug("PCR poll: all responses zero (consecutive=%d)", consecutive_auth_failures)
+                    continue
+                consecutive_auth_failures = 0
 
                 self._pcr_tracker.reset()
                 for sid, is_call, oi in results:
