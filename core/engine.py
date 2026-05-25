@@ -416,7 +416,7 @@ class Engine:
             _open = self._execution_engine.open_trade
             _exit_ltp = (self.state.atm_ltp if (_open and _open.direction == "CALL")
                          else self.state.atm_put_ltp)
-            if _exit_ltp:
+            if _open is not None and _exit_ltp > 0:
                 closed = self._execution_engine.check_time_stop(_exit_ltp)
                 if closed:
                     await self._on_trade_close(closed)
@@ -852,6 +852,25 @@ class Engine:
     async def _heartbeat(self) -> None:
         while True:
             self.state.last_heartbeat = time.time()
+            # Build instrument_map snapshot inline (same shape as HTTP /api/status)
+            raw = self._instrument_manager.current_map()
+            imap_dict = None
+            if raw:
+                imap_dict = {
+                    "atm_strike":       raw.atm_strike,
+                    "itm_call_symbol":  raw.itm_call.symbol if raw.itm_call else None,
+                    "itm_call_strike":  raw.itm_call.strike_price if raw.itm_call else None,
+                    "itm_put_symbol":   raw.itm_put.symbol if raw.itm_put else None,
+                    "itm_put_strike":   raw.itm_put.strike_price if raw.itm_put else None,
+                    "otm_call_symbol":  raw.otm_call.symbol,
+                    "otm_call_strike":  raw.otm_call.strike_price,
+                    "otm_call_delta":   raw.otm_call.delta,
+                    "otm_call_iv":      round(raw.otm_call.iv * 100, 2),
+                    "otm_put_symbol":   raw.otm_put.symbol,
+                    "otm_put_strike":   raw.otm_put.strike_price,
+                    "otm_put_delta":    raw.otm_put.delta,
+                    "otm_put_iv":       round(raw.otm_put.iv * 100, 2),
+                }
             await self._broadcast({
                 "type":           "status",
                 "engine_state":   self.state.engine_state.value,
@@ -873,6 +892,8 @@ class Engine:
                 "last_ratio":         self.state.last_ratio,
                 "vwap":               self.state.vwap,
                 "above_vwap":         self.state.above_vwap,
+                "warmup_remaining":   self.state.warmup_remaining_seconds,
+                "instrument_map":     imap_dict,
                 "pressure_verdict":       self.state.pressure_verdict,
                 "heavyweight_score":      self.state.heavyweight_score,
                 "heavyweight_direction":  self.state.heavyweight_direction,
