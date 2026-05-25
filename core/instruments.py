@@ -711,36 +711,49 @@ class InstrumentManager:
     async def _fetch_spot_ltp(self) -> float:
         """Get NIFTY spot via Dhan intraday chart (requires auth).
         Falls back to a hardcoded recent-ish value if auth fails.
+        Retries up to 3 times — the first attempt right after startup
+        often gets a ConnectTimeout that succeeds on the next try.
         """
         if not self._dhan_access_token:
             logger.warning("No token — using fallback spot for initial calibration")
             return 24500.0  # rough NIFTY level; corrected once WS ticks arrive
 
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    "https://api.dhan.co/v2/charts/intraday",
-                    headers={
-                        "access-token": self._dhan_access_token,
-                        "client-id":    self._dhan_client_id,
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "securityId":      "13",
-                        "exchangeSegment": "IDX_I",
-                        "instrument":      "INDEX",
-                        "interval":        "1",
-                        "fromDate":        now_ist().strftime("%Y-%m-%d"),
-                        "toDate":          now_ist().strftime("%Y-%m-%d"),
-                    },
-                )
-                if resp.is_success:
-                    data = resp.json()
-                    closes = data.get("close", [])
-                    if closes:
-                        return float(closes[-1])
-        except Exception as e:
-            logger.warning("Spot fetch via chart API failed: %s", repr(e))
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(2.0)
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(
+                        "https://api.dhan.co/v2/charts/intraday",
+                        headers={
+                            "access-token": self._dhan_access_token,
+                            "client-id":    self._dhan_client_id,
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "securityId":      "13",
+                            "exchangeSegment": "IDX_I",
+                            "instrument":      "INDEX",
+                            "interval":        "1",
+                            "fromDate":        now_ist().strftime("%Y-%m-%d"),
+                            "toDate":          now_ist().strftime("%Y-%m-%d"),
+                        },
+                    )
+                    if resp.is_success:
+                        data = resp.json()
+                        closes = data.get("close", [])
+                        if closes:
+                            return float(closes[-1])
+                    break  # non-retriable response (auth error etc.) — fall through
+            except (httpx.ConnectTimeout, httpx.ConnectError) as e:
+                if attempt < 2:
+                    logger.debug("Spot fetch attempt %d failed (%s) — retrying",
+                                 attempt + 1, type(e).__name__)
+                    continue
+                logger.warning("Spot fetch via chart API failed after 3 attempts: %s", repr(e))
+            except Exception as e:
+                logger.warning("Spot fetch via chart API failed: %s", repr(e))
+                break
 
         logger.warning("Could not get live spot — using fallback; will recalibrate after first tick")
         return 24500.0
