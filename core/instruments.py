@@ -739,18 +739,24 @@ class InstrumentManager:
                             "toDate":          now_ist().strftime("%Y-%m-%d"),
                         },
                     )
+                    if resp.status_code == 401:
+                        logger.warning("Spot fetch: 401 Unauthorized — token invalid")
+                        break  # auth error, no point retrying
                     if resp.is_success:
                         data = resp.json()
                         closes = data.get("close", [])
                         if closes:
                             return float(closes[-1])
-                    break  # non-retriable response (auth error etc.) — fall through
+                        # HTTP 200 but empty closes — Dhan API inconsistency at
+                        # startup; the same call succeeds seconds later, so retry.
+                        logger.debug("Spot fetch attempt %d: HTTP 200 but empty closes — retrying",
+                                     attempt + 1)
+                        continue
+                    logger.debug("Spot fetch attempt %d: HTTP %s — retrying",
+                                 attempt + 1, resp.status_code)
             except (httpx.ConnectTimeout, httpx.ConnectError) as e:
-                if attempt < 2:
-                    logger.debug("Spot fetch attempt %d failed (%s) — retrying",
-                                 attempt + 1, type(e).__name__)
-                    continue
-                logger.warning("Spot fetch via chart API failed after 3 attempts: %s", repr(e))
+                logger.debug("Spot fetch attempt %d failed (%s) — retrying",
+                             attempt + 1, type(e).__name__)
             except Exception as e:
                 logger.warning("Spot fetch via chart API failed: %s", repr(e))
                 break
