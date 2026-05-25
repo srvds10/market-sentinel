@@ -218,10 +218,12 @@ class InstrumentManager:
         # Monotonic timestamp of the last grid-edge recalibration trigger;
         # guards against re-firing on every tick while spot is near the edge.
         self._last_edge_recal: float = 0.0
+        self._recalibrate_reason: str | None = None
 
     def update_token(self, token: str) -> None:
         """Hot-update the access token and trigger immediate recalibration."""
         self._dhan_access_token = token
+        self._recalibrate_reason = "token update"
         self._recalibrate_now.set()
 
     async def run(self) -> None:
@@ -232,7 +234,9 @@ class InstrumentManager:
                 try:
                     await asyncio.wait_for(self._recalibrate_now.wait(), timeout=self._interval)
                     self._recalibrate_now.clear()
-                    logger.info("Token updated — recalibrating instruments immediately")
+                    reason = self._recalibrate_reason or "grid edge"
+                    self._recalibrate_reason = None
+                    logger.info("Recalibrating immediately — %s", reason)
                 except asyncio.TimeoutError:
                     pass
             except asyncio.CancelledError:
@@ -243,7 +247,9 @@ class InstrumentManager:
                 try:
                     await asyncio.wait_for(self._recalibrate_now.wait(), timeout=60)
                     self._recalibrate_now.clear()
-                    logger.info("Token updated — retrying recalibration")
+                    reason = self._recalibrate_reason or "grid edge"
+                    self._recalibrate_reason = None
+                    logger.info("Retrying calibration — %s", reason)
                 except asyncio.TimeoutError:
                     pass
 
@@ -285,10 +291,14 @@ class InstrumentManager:
         """True when the *grid* (set of subscribed strikes) changed — i.e. the
         WS needs to resubscribe.  Active ATM/OTM shifts inside the same grid
         do NOT trigger a reconnect; they are handled by update_active_for_spot.
+
+        Returns False on the very first calibration (old is None) because no
+        WS provider is connected yet — _tick_loop waits for current_map() to be
+        non-None before creating the provider, so there is nothing to reconnect.
         """
         old = self._current_map
         if old is None:
-            return True
+            return False
         old_call_ids = {c.security_id for c in old.all_calls}
         new_call_ids = {c.security_id for c in new_map.all_calls}
         old_put_ids  = {p.security_id for p in old.all_puts}
@@ -560,6 +570,7 @@ class InstrumentManager:
                     new_itm_put.symbol  if new_itm_put  else "None",
                     len(otm_calls), len(otm_puts),
                 )
+                self._recalibrate_reason = "grid edge"
                 self._recalibrate_now.set()
 
         changed = (

@@ -304,6 +304,15 @@ class Engine:
     # ------------------------------------------------------------------
 
     async def _tick_loop(self) -> None:
+        # Wait for the first instrument calibration before creating the WS provider.
+        # Without this, the provider starts with NIFTY-SPOT only, the calibration
+        # finishes and fires reconnect #1, then the first tick reveals the fallback
+        # ATM was wrong and fires reconnect #2 — two warmup resets before a single
+        # tick is processed.  Waiting here costs ~20-30s at startup but eliminates
+        # both unnecessary reconnects.
+        while self._instrument_manager.current_map() is None:
+            await asyncio.sleep(0.1)
+
         while True:
             self._signal_engine.reset()
             provider = self._make_provider()
