@@ -37,6 +37,7 @@ export interface StatusPayload {
   }>
   nifty_pcr: number | null
   pcr_sentiment: string
+  pcr_trend: string
   pcr_call_oi: number
   pcr_put_oi: number
   itm_call_mins: number[]

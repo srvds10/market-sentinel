@@ -1,12 +1,12 @@
 """
 NIFTY Put-Call Ratio (PCR) tracker.
 
-PCR = total put OI / total call OI across the subscribed option grid.
+PCR = near-ATM put OI / near-ATM call OI (±4 strikes from ATM).
 
 Interpretation (directional, not contrarian):
-  PCR > 1.2 → more put OI than call OI  → PUT HEAVY (bearish market positioning)
-  PCR < 0.8 → more call OI than put OI  → CALL HEAVY (bullish market positioning)
-  0.8–1.2   → balanced
+  PCR > 1.1 → more put OI than call OI  → PUT HEAVY (bearish positioning)
+  PCR < 0.9 → more call OI than put OI  → CALL HEAVY (bullish positioning)
+  0.9–1.1   → balanced (trend used as tie-breaker in Gate 5)
 """
 
 from __future__ import annotations
@@ -39,9 +39,9 @@ class PCRTracker:
         val = (p / c) if c != 0 else None
         if val is None:
             sentiment = 'WAIT'
-        elif val >= 1.2:
+        elif val >= 1.1:
             sentiment = 'PUT_HEAVY'
-        elif val <= 0.8:
+        elif val <= 0.9:
             sentiment = 'CALL_HEAVY'
         else:
             sentiment = 'BALANCED'

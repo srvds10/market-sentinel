@@ -3,6 +3,7 @@ import clsx from 'clsx'
 interface Props {
   pcr: number | null
   sentiment: string
+  trend: string
   callOi: number
   putOi: number
 }
@@ -14,14 +15,21 @@ const SENTIMENT_STYLE: Record<string, { label: string; cls: string }> = {
   WAIT:       { label: 'COLLECTING', cls: 'text-muted' },
 }
 
+const TREND_STYLE: Record<string, { arrow: string; cls: string }> = {
+  RISING:  { arrow: '↑', cls: 'text-bear'  },
+  FALLING: { arrow: '↓', cls: 'text-bull'  },
+  FLAT:    { arrow: '—', cls: 'text-muted' },
+}
+
 function fmtOi(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
   if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}K`
   return String(n)
 }
 
-export function PCRGauge({ pcr, sentiment, callOi, putOi }: Props) {
+export function PCRGauge({ pcr, sentiment, trend, callOi, putOi }: Props) {
   const s = SENTIMENT_STYLE[sentiment] ?? SENTIMENT_STYLE.WAIT
+  const t = TREND_STYLE[trend] ?? TREND_STYLE.FLAT
   const total = callOi + putOi
   const callPct = total > 0 ? (callOi / total) * 100 : 50
   const putPct  = total > 0 ? (putOi  / total) * 100 : 50
@@ -40,6 +48,9 @@ export function PCRGauge({ pcr, sentiment, callOi, putOi }: Props) {
               PCR {pcr.toFixed(2)}
             </span>
           )}
+          <span className={clsx('text-[10px] font-bold', t.cls)} title={`Trend: ${trend}`}>
+            {t.arrow}
+          </span>
           <span className={clsx('text-[10px] font-bold', s.cls)}>{s.label}</span>
         </div>
       </div>

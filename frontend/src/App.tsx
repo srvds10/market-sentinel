@@ -315,6 +315,7 @@ export default function App() {
           <PCRGauge
             pcr={status.nifty_pcr ?? null}
             sentiment={status.pcr_sentiment ?? 'WAIT'}
+            trend={status.pcr_trend ?? 'FLAT'}
             callOi={status.pcr_call_oi ?? 0}
             putOi={status.pcr_put_oi ?? 0}
           />

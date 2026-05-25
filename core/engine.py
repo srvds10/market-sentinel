@@ -97,6 +97,7 @@ class AppState:
     # Put-Call Ratio (polled from Dhan quote API every 60s)
     nifty_pcr: float | None = None
     pcr_sentiment: str = 'WAIT'
+    pcr_trend: str = 'FLAT'        # RISING | FALLING | FLAT
     pcr_call_oi: int = 0
     pcr_put_oi: int = 0
     pcr_last_update: float = 0.0  # monotonic time of last successful poll
@@ -534,19 +535,31 @@ class Engine:
                 )
 
         # --- Gate 5: NIFTY PCR sentiment filter ----------------------------------
-        # Only PUT_HEAVY allows PUT; only CALL_HEAVY allows CALL.
-        # WAIT (no data yet), BALANCED, and stale readings all block entries.
+        # PUT_HEAVY  → only PUT allowed.
+        # CALL_HEAVY → only CALL allowed.
+        # BALANCED with RISING trend  → treat as weak PUT_HEAVY (block CALL, allow PUT).
+        # BALANCED with FALLING trend → treat as weak CALL_HEAVY (block PUT, allow CALL).
+        # BALANCED + FLAT, WAIT, and stale readings → block all entries.
         if skip_reason is None:
             stale = (
                 self.state.pcr_last_update == 0.0
                 or (time.monotonic() - self.state.pcr_last_update) > PCR_STALE_SECONDS
             )
-            pcr_sent = 'WAIT' if stale else self.state.pcr_sentiment
-            pcr_val  = f"{self.state.nifty_pcr:.3f}" if self.state.nifty_pcr is not None else "n/a"
+            pcr_sent  = 'WAIT' if stale else self.state.pcr_sentiment
+            pcr_trend = self.state.pcr_trend
+            pcr_val   = f"{self.state.nifty_pcr:.3f}" if self.state.nifty_pcr is not None else "n/a"
             if stale:
                 skip_reason = f"PCR={pcr_val} stale (>{PCR_STALE_SECONDS:.0f}s) — treating as WAIT"
-            elif pcr_sent in ('WAIT', 'BALANCED'):
-                skip_reason = f"PCR={pcr_val} ({pcr_sent}) — no clear OI bias, skip"
+            elif pcr_sent == 'WAIT':
+                skip_reason = f"PCR={pcr_val} (WAIT) — no data yet, skip"
+            elif pcr_sent == 'BALANCED':
+                if pcr_trend == 'RISING' and signal.direction == 'CALL':
+                    skip_reason = f"PCR={pcr_val} BALANCED+RISING — put OI building, blocks CALL"
+                elif pcr_trend == 'FALLING' and signal.direction == 'PUT':
+                    skip_reason = f"PCR={pcr_val} BALANCED+FALLING — call OI building, blocks PUT"
+                elif pcr_trend == 'FLAT':
+                    skip_reason = f"PCR={pcr_val} (BALANCED+FLAT) — no directional bias, skip"
+                # BALANCED + trend aligned with signal direction → allow (no skip_reason set)
             elif pcr_sent == 'PUT_HEAVY' and signal.direction == 'CALL':
                 skip_reason = f"PCR={pcr_val} ({pcr_sent}) blocks CALL entry"
             elif pcr_sent == 'CALL_HEAVY' and signal.direction == 'PUT':
@@ -718,12 +731,17 @@ class Engine:
     async def _pcr_poll_loop(self) -> None:
         """Compute NIFTY PCR every 60s using Dhan intraday chart OI data.
 
-        Calls POST /v2/charts/intraday with oi=True for every strike in the
-        current grid sequentially with a 1.5 s inter-request delay.  Sequential
-        mode is mandatory: Dhan's burst limit is ~5 requests per window, so any
-        concurrent approach quickly exhausts it and fills the log with 429s.
+        Only polls the 9 nearest strikes on each side of ATM (±4 steps ≈ ±200 pts).
+        Deep-OTM strikes carry institutional hedge OI that obscures intraday
+        directional sentiment; near-ATM OI is where live directional money flows.
+
+        Requests are sequential with a 1.5 s delay — Dhan's burst limit is ~5/window
+        and any concurrent approach floods the log with 429s.
+
+        Tracks a 6-poll rolling PCR history to compute a RISING/FALLING/FLAT trend.
         """
         import httpx
+        from collections import deque
         from itertools import zip_longest
 
         dhan = self._cfg["dhan"]
@@ -772,6 +790,7 @@ class Engine:
             return sid, is_call, 0, 0
 
         consecutive_auth_failures = 0
+        pcr_history: deque[float] = deque(maxlen=6)  # last 6 successful PCR readings
 
         while True:
             # After repeated real 401s, back off to 10 minutes.
@@ -788,8 +807,20 @@ class Engine:
                 continue
 
             today = now_ist().strftime("%Y-%m-%d")
-            calls = [(s.security_id, True)  for s in imap.all_calls if s.security_id]
-            puts  = [(s.security_id, False) for s in imap.all_puts  if s.security_id]
+
+            # Near-ATM only: keep the 9 closest call and put strikes to ATM.
+            # Deep-OTM strikes carry institutional hedge OI that obscures intraday
+            # sentiment; near-ATM OI is where live directional money actually flows.
+            near_calls = sorted(
+                [s for s in imap.all_calls if s.security_id],
+                key=lambda s: abs(s.strike_price - imap.atm_strike),
+            )[:9]
+            near_puts = sorted(
+                [s for s in imap.all_puts if s.security_id],
+                key=lambda s: abs(s.strike_price - imap.atm_strike),
+            )[:9]
+            calls = [(s.security_id, True)  for s in near_calls]
+            puts  = [(s.security_id, False) for s in near_puts]
             # Interleave calls and puts so any early rate-limit cut affects both equally
             strikes = [
                 x for pair in zip_longest(calls, puts) for x in pair if x is not None
@@ -849,16 +880,35 @@ class Engine:
                     self._pcr_tracker.update(sid, oi, is_call)
 
                 snap = self._pcr_tracker.snapshot()
-                if snap["call_oi"] > 0 and snap["put_oi"] > 0:
-                    self.state.nifty_pcr      = snap["pcr"]
+                if snap["call_oi"] > 0 and snap["put_oi"] > 0 and snap["pcr"] is not None:
+                    pcr_val = snap["pcr"]
+                    pcr_history.append(pcr_val)
+
+                    # Trend: compare older half vs newer half of the rolling buffer.
+                    # Need ≥ 4 readings; 0.05 PCR change threshold for RISING/FALLING.
+                    if len(pcr_history) >= 4:
+                        mid = len(pcr_history) // 2
+                        older = sum(list(pcr_history)[:mid]) / mid
+                        newer = sum(list(pcr_history)[mid:]) / (len(pcr_history) - mid)
+                        delta = newer - older
+                        if delta > 0.05:
+                            trend = 'RISING'
+                        elif delta < -0.05:
+                            trend = 'FALLING'
+                        else:
+                            trend = 'FLAT'
+                    else:
+                        trend = 'FLAT'
+
+                    self.state.nifty_pcr      = pcr_val
                     self.state.pcr_sentiment  = snap["sentiment"]
+                    self.state.pcr_trend      = trend
                     self.state.pcr_call_oi    = snap["call_oi"]
                     self.state.pcr_put_oi     = snap["put_oi"]
                     self.state.pcr_last_update = time.monotonic()
                     logger.info(
-                        "PCR: %.3f (%s)  call_oi=%s  put_oi=%s",
-                        snap["pcr"] if snap["pcr"] is not None else 0.0,
-                        snap["sentiment"],
+                        "PCR: %.3f (%s  %s)  call_oi=%s  put_oi=%s",
+                        pcr_val, snap["sentiment"], trend,
                         f"{snap['call_oi']:,}", f"{snap['put_oi']:,}",
                     )
                 else:
@@ -920,6 +970,7 @@ class Engine:
                 "heavyweight_stocks":     self.state.heavyweight_stocks,
                 "nifty_pcr":             self.state.nifty_pcr,
                 "pcr_sentiment":         self.state.pcr_sentiment,
+                "pcr_trend":             self.state.pcr_trend,
                 "pcr_call_oi":           self.state.pcr_call_oi,
                 "pcr_put_oi":            self.state.pcr_put_oi,
                 "itm_call_mins":  list(self.state.itm_call_mins),
