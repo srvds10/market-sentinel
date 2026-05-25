@@ -99,6 +99,7 @@ class AppState:
     pcr_sentiment: str = 'WAIT'
     pcr_call_oi: int = 0
     pcr_put_oi: int = 0
+    pcr_last_update: float = 0.0  # monotonic time of last successful poll
 
     # Per-minute LTP snapshots for the Option Pressure panel (max 15 entries each)
     itm_call_mins: list[float] = field(default_factory=list)
@@ -140,6 +141,7 @@ def load_config(path: str = "config.yaml") -> dict:
 # ---------------------------------------------------------------------------
 
 _PRESSURE_THRESHOLD = 0.01  # 1 % deviation triggers a signal
+PCR_STALE_SECONDS   = 300.0  # treat PCR as WAIT if no successful poll in 5 min
 
 
 def _leg_pressure(minutes: list[float]) -> str:
@@ -533,11 +535,17 @@ class Engine:
 
         # --- Gate 5: NIFTY PCR sentiment filter ----------------------------------
         # Only PUT_HEAVY allows PUT; only CALL_HEAVY allows CALL.
-        # WAIT (no data yet) and BALANCED both block all entries.
+        # WAIT (no data yet), BALANCED, and stale readings all block entries.
         if skip_reason is None:
-            pcr_sent = self.state.pcr_sentiment
+            stale = (
+                self.state.pcr_last_update == 0.0
+                or (time.monotonic() - self.state.pcr_last_update) > PCR_STALE_SECONDS
+            )
+            pcr_sent = 'WAIT' if stale else self.state.pcr_sentiment
             pcr_val  = f"{self.state.nifty_pcr:.3f}" if self.state.nifty_pcr is not None else "n/a"
-            if pcr_sent in ('WAIT', 'BALANCED'):
+            if stale:
+                skip_reason = f"PCR={pcr_val} stale (>{PCR_STALE_SECONDS:.0f}s) — treating as WAIT"
+            elif pcr_sent in ('WAIT', 'BALANCED'):
                 skip_reason = f"PCR={pcr_val} ({pcr_sent}) — no clear OI bias, skip"
             elif pcr_sent == 'PUT_HEAVY' and signal.direction == 'CALL':
                 skip_reason = f"PCR={pcr_val} ({pcr_sent}) blocks CALL entry"
@@ -799,17 +807,19 @@ class Engine:
                         *(_fetch_oi(sid, ic, client, today) for sid, ic in strikes)
                     )
 
-                # Require both sides to have OI before updating state.
-                # If one side is all-zero (partial 401 or illiquid), treat the
-                # whole batch as failed to keep the previous reading consistent.
-                call_total = sum(oi for _, ic, oi in results if ic)
-                put_total  = sum(oi for _, ic, oi in results if not ic)
-                if call_total == 0 or put_total == 0:
+                # Require at least 1/3 of each side to respond with non-zero OI.
+                # A skewed partial batch (e.g. 1 put vs 10 calls) produces a
+                # garbage ratio; reject it the same as a fully-failed batch.
+                min_hits = max(3, len(calls) // 3)
+                call_hits = sum(1 for _, ic, oi in results if ic     and oi > 0)
+                put_hits  = sum(1 for _, ic, oi in results if not ic and oi > 0)
+                if call_hits < min_hits or put_hits < min_hits:
                     consecutive_auth_failures += 1
                     logger.debug(
-                        "PCR poll: one-sided result (call_oi=%s  put_oi=%s) — "
+                        "PCR poll: insufficient coverage "
+                        "(call_hits=%d  put_hits=%d  min=%d) — "
                         "keeping previous reading (consecutive=%d)",
-                        f"{call_total:,}", f"{put_total:,}", consecutive_auth_failures,
+                        call_hits, put_hits, min_hits, consecutive_auth_failures,
                     )
                     continue
                 consecutive_auth_failures = 0
@@ -820,10 +830,11 @@ class Engine:
 
                 snap = self._pcr_tracker.snapshot()
                 if snap["call_oi"] > 0 and snap["put_oi"] > 0:
-                    self.state.nifty_pcr     = snap["pcr"]
-                    self.state.pcr_sentiment = snap["sentiment"]
-                    self.state.pcr_call_oi   = snap["call_oi"]
-                    self.state.pcr_put_oi    = snap["put_oi"]
+                    self.state.nifty_pcr      = snap["pcr"]
+                    self.state.pcr_sentiment  = snap["sentiment"]
+                    self.state.pcr_call_oi    = snap["call_oi"]
+                    self.state.pcr_put_oi     = snap["put_oi"]
+                    self.state.pcr_last_update = time.monotonic()
                     logger.info(
                         "PCR: %.3f (%s)  call_oi=%s  put_oi=%s",
                         snap["pcr"] if snap["pcr"] is not None else 0.0,
