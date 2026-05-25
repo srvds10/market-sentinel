@@ -219,6 +219,7 @@ class InstrumentManager:
         # guards against re-firing on every tick while spot is near the edge.
         self._last_edge_recal: float = 0.0
         self._recalibrate_reason: str | None = None
+        self._pending_reason: str = 'grid edge'  # last reason passed to on_instruments_changed
 
     def update_token(self, token: str) -> None:
         """Hot-update the access token and trigger immediate recalibration."""
@@ -236,6 +237,7 @@ class InstrumentManager:
                     self._recalibrate_now.clear()
                     reason = self._recalibrate_reason or "grid edge"
                     self._recalibrate_reason = None
+                    self._pending_reason = reason
                     logger.info("Recalibrating immediately — %s", reason)
                 except asyncio.TimeoutError:
                     pass
@@ -249,6 +251,7 @@ class InstrumentManager:
                     self._recalibrate_now.clear()
                     reason = self._recalibrate_reason or "grid edge"
                     self._recalibrate_reason = None
+                    self._pending_reason = reason
                     logger.info("Retrying calibration — %s", reason)
                 except asyncio.TimeoutError:
                     pass
@@ -311,6 +314,10 @@ class InstrumentManager:
 
     def current_map(self) -> Optional[InstrumentMap]:
         return self._current_map
+
+    def last_reconnect_reason(self) -> str:
+        """Reason string set just before the most recent on_instruments_changed callback."""
+        return self._pending_reason
 
     def update_active_for_spot(self, spot: float) -> bool:
         """Re-pick ATM/OTM legs from the grid based on the latest spot tick.

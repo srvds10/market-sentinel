@@ -361,7 +361,8 @@ class Engine:
             # Token update triggers immediate reconnect with new credentials
             if self.state.reconnect_event.is_set():
                 self.state.reconnect_event.clear()
-                logger.info("Reconnect triggered by token update")
+                logger.info("Reconnect triggered — %s",
+                            self._instrument_manager.last_reconnect_reason())
                 return
 
             try:
@@ -705,11 +706,12 @@ class Engine:
                 except Exception as exc:
                     logger.error("Heavyweight resolve failed: %s", exc, exc_info=True)
                     return
-                # Wait until warmup is done before triggering a WS reconnect —
-                # reconnecting mid-warmup resets the Z-score baseline.
-                while self.state.engine_state == EngineState.WARMING_UP:
-                    await asyncio.sleep(2.0)
-                self.state.reconnect_event.set()
+                # No reconnect needed: _instrument_provider() calls
+                # hw_tracker.dhan_instruments() which returns the resolved IDs,
+                # and heavyweight resolution completes before the initial WS
+                # connection is established (both depend on the same scrip master
+                # CSV download).  Triggering a reconnect here would reset the
+                # 300s warmup blackout unnecessarily.
                 return
             await asyncio.sleep(2.0)
         logger.warning("Heavyweight resolve timed out — scrip master not available yet")
