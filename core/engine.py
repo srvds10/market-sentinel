@@ -719,9 +719,9 @@ class Engine:
         """Compute NIFTY PCR every 60s using Dhan intraday chart OI data.
 
         Calls POST /v2/charts/intraday with oi=True for every strike in the
-        current grid concurrently (asyncio.gather).  The last element of the
-        returned open_interest array is the most-recent-minute OI for that
-        strike.  Sums all call OI and all put OI separately → PCR.
+        current grid sequentially with a 1.5 s inter-request delay.  Sequential
+        mode is mandatory: Dhan's burst limit is ~5 requests per window, so any
+        concurrent approach quickly exhausts it and fills the log with 429s.
         """
         import httpx
         from itertools import zip_longest
@@ -732,53 +732,54 @@ class Engine:
             "client-id":     dhan.get("client_id", ""),
             "Content-Type":  "application/json",
         }
-        # Limit concurrent requests to avoid Dhan rate-limit rejections
-        sem = asyncio.Semaphore(8)
 
+        # Returns (sid, is_call, oi, http_status) so the caller can distinguish
+        # 429 rate-limits from 401 auth errors without re-fetching.
         async def _fetch_oi(
             sid: str, is_call: bool, client: httpx.AsyncClient, today: str
-        ) -> tuple[str, bool, int]:
-            async with sem:
-                try:
-                    r = await client.post(
-                        "https://api.dhan.co/v2/charts/intraday",
-                        headers=headers,
-                        json={
-                            "securityId":      sid,
-                            "exchangeSegment": "NSE_FNO",
-                            "instrument":      "OPTIDX",
-                            "interval":        "1",
-                            "oi":              True,
-                            "fromDate":        today,
-                            "toDate":          today,
-                        },
+        ) -> tuple[str, bool, int, int]:
+            try:
+                r = await client.post(
+                    "https://api.dhan.co/v2/charts/intraday",
+                    headers=headers,
+                    json={
+                        "securityId":      sid,
+                        "exchangeSegment": "NSE_FNO",
+                        "instrument":      "OPTIDX",
+                        "interval":        "1",
+                        "oi":              True,
+                        "fromDate":        today,
+                        "toDate":          today,
+                    },
+                )
+                if r.is_success:
+                    body = r.json()
+                    oi_arr = body.get("open_interest") or []
+                    if oi_arr:
+                        return sid, is_call, int(float(oi_arr[-1])), r.status_code
+                    logger.debug(
+                        "PCR fetch %s (call=%s): empty OI, keys=%s",
+                        sid, is_call, list(body.keys()),
                     )
-                    if r.is_success:
-                        body = r.json()
-                        oi_arr = body.get("open_interest") or []
-                        if oi_arr:
-                            return sid, is_call, int(float(oi_arr[-1]))
-                        logger.debug(
-                            "PCR fetch %s (call=%s): empty OI, keys=%s",
-                            sid, is_call, list(body.keys()),
-                        )
-                    else:
-                        logger.debug(
-                            "PCR fetch %s (call=%s): HTTP %s — %s",
-                            sid, is_call, r.status_code, r.text[:120],
-                        )
-                except Exception as exc:
-                    logger.debug("PCR fetch %s (call=%s): %r", sid, is_call, exc)
-            return sid, is_call, 0
+                else:
+                    logger.debug(
+                        "PCR fetch %s (call=%s): HTTP %s — %s",
+                        sid, is_call, r.status_code, r.text[:120],
+                    )
+                return sid, is_call, 0, r.status_code
+            except Exception as exc:
+                logger.debug("PCR fetch %s (call=%s): %r", sid, is_call, exc)
+            return sid, is_call, 0, 0
 
         consecutive_auth_failures = 0
 
         while True:
-            # After repeated 401s, back off to 10 minutes to avoid hammering Dhan
+            # After repeated real 401s, back off to 10 minutes.
+            # 429 rate-limit hits are handled per-poll and do NOT affect this counter.
             sleep_secs = 600.0 if consecutive_auth_failures >= 2 else 60.0
             if consecutive_auth_failures >= 2:
                 logger.warning(
-                    "PCR poll: %d consecutive 401s — backing off to 10 min",
+                    "PCR poll: %d consecutive auth failures (401) — backing off to 10 min",
                     consecutive_auth_failures,
                 )
             await asyncio.sleep(sleep_secs)
@@ -789,7 +790,7 @@ class Engine:
             today = now_ist().strftime("%Y-%m-%d")
             calls = [(s.security_id, True)  for s in imap.all_calls if s.security_id]
             puts  = [(s.security_id, False) for s in imap.all_puts  if s.security_id]
-            # Interleave calls and puts so any rate-limit cut affects both equally
+            # Interleave calls and puts so any early rate-limit cut affects both equally
             strikes = [
                 x for pair in zip_longest(calls, puts) for x in pair if x is not None
             ]
@@ -797,35 +798,54 @@ class Engine:
                 continue
 
             logger.debug(
-                "PCR poll: %d calls, %d puts → %d requests",
+                "PCR poll: %d calls, %d puts → %d requests (sequential, 1.5 s delay)",
                 len(calls), len(puts), len(strikes),
             )
 
             try:
+                results: list[tuple[str, bool, int, int]] = []
                 async with httpx.AsyncClient(timeout=15.0) as client:
-                    results = await asyncio.gather(
-                        *(_fetch_oi(sid, ic, client, today) for sid, ic in strikes)
+                    for i, (sid, ic) in enumerate(strikes):
+                        if i > 0:
+                            await asyncio.sleep(1.5)  # stay under Dhan's burst limit
+                        results.append(await _fetch_oi(sid, ic, client, today))
+
+                # Count real auth failures (401) separately from rate-limit hits (429).
+                # Only 401s drive the backoff — 429s just mean this poll was throttled.
+                auth_errors = sum(1 for _, _, _, sc in results if sc == 401)
+                rate_limited = sum(1 for _, _, _, sc in results if sc == 429)
+                if auth_errors > 0:
+                    consecutive_auth_failures += 1
+                    logger.warning(
+                        "PCR poll: %d strike(s) returned 401 — "
+                        "token may be invalid (consecutive=%d)",
+                        auth_errors, consecutive_auth_failures,
+                    )
+                    continue
+                if rate_limited > 0:
+                    logger.debug(
+                        "PCR poll: %d strike(s) rate-limited (429) — "
+                        "keeping previous reading",
+                        rate_limited,
                     )
 
                 # Require at least 1/3 of each side to respond with non-zero OI.
                 # A skewed partial batch (e.g. 1 put vs 10 calls) produces a
-                # garbage ratio; reject it the same as a fully-failed batch.
+                # garbage ratio; reject it.  This is NOT an auth failure.
                 min_hits = max(3, len(calls) // 3)
-                call_hits = sum(1 for _, ic, oi in results if ic     and oi > 0)
-                put_hits  = sum(1 for _, ic, oi in results if not ic and oi > 0)
+                call_hits = sum(1 for _, ic, oi, _ in results if ic     and oi > 0)
+                put_hits  = sum(1 for _, ic, oi, _ in results if not ic and oi > 0)
                 if call_hits < min_hits or put_hits < min_hits:
-                    consecutive_auth_failures += 1
                     logger.debug(
                         "PCR poll: insufficient coverage "
-                        "(call_hits=%d  put_hits=%d  min=%d) — "
-                        "keeping previous reading (consecutive=%d)",
-                        call_hits, put_hits, min_hits, consecutive_auth_failures,
+                        "(call_hits=%d  put_hits=%d  min=%d) — keeping previous reading",
+                        call_hits, put_hits, min_hits,
                     )
                     continue
                 consecutive_auth_failures = 0
 
                 self._pcr_tracker.reset()
-                for sid, is_call, oi in results:
+                for sid, is_call, oi, _ in results:
                     self._pcr_tracker.update(sid, oi, is_call)
 
                 snap = self._pcr_tracker.snapshot()
