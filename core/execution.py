@@ -240,6 +240,14 @@ class ExecutionEngine:
 
         capital_at_risk = self._capital * self.config.max_position_pct
         max_lots = max(1, int(capital_at_risk / (entry_price * self.config.lot_size)))
+        one_lot_cost = entry_price * self.config.lot_size
+        if max_lots == 1 and one_lot_cost > capital_at_risk:
+            logger.warning(
+                "1-lot cost ₹%.0f exceeds capital cap ₹%.0f (%.0f%% of capital) "
+                "— trading minimum 1 lot",
+                one_lot_cost, capital_at_risk,
+                100.0 * one_lot_cost / self._capital if self._capital else 0,
+            )
 
         if self.config.scale_by_zscore and self.config.scale_zscore_per_lot > 0:
             scaled = max(1, int(signal.z_score / self.config.scale_zscore_per_lot))

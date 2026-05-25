@@ -297,6 +297,13 @@ class Engine:
         finally:
             for t in tasks:
                 t.cancel()
+            if self._tick_csv_fh is not None:
+                try:
+                    self._tick_csv_fh.flush()
+                    self._tick_csv_fh.close()
+                except OSError:
+                    pass
+                self._tick_csv_fh = None
             await self._db.close()
 
     # ------------------------------------------------------------------
@@ -1055,5 +1062,6 @@ class Engine:
             return
         try:
             csv.writer(self._tick_csv_fh).writerow([tick.timestamp, tick.symbol, tick.ltp])
+            self._tick_csv_fh.flush()
         except OSError:
             pass
