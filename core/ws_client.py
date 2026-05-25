@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import struct
 import time
 from abc import ABC, abstractmethod
@@ -218,7 +219,7 @@ class DhanWSClient(TickProvider):
             ltp = struct.unpack_from("<f", data, 8)[0]
         except struct.error:
             return None
-        if not ltp or security_id not in sym_map:
+        if not ltp or not math.isfinite(ltp) or ltp < 0 or security_id not in sym_map:
             return None
         return Tick(
             symbol=sym_map[security_id],

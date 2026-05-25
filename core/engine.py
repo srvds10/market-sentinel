@@ -310,8 +310,10 @@ class Engine:
         # ATM was wrong and fires reconnect #2 — two warmup resets before a single
         # tick is processed.  Waiting here costs ~20-30s at startup but eliminates
         # both unnecessary reconnects.
+        logger.info("Tick loop waiting for first instrument calibration…")
         while self._instrument_manager.current_map() is None:
             await asyncio.sleep(0.1)
+        logger.info("First calibration complete — starting WS provider")
 
         while True:
             self._signal_engine.reset()
@@ -698,7 +700,11 @@ class Engine:
         for _ in range(30):          # up to 60s wait
             csv_text = self._instrument_manager.cached_csv()
             if csv_text:
-                self._hw_tracker.resolve_from_scrip_master(csv_text)
+                try:
+                    self._hw_tracker.resolve_from_scrip_master(csv_text)
+                except Exception as exc:
+                    logger.error("Heavyweight resolve failed: %s", exc, exc_info=True)
+                    return
                 # Wait until warmup is done before triggering a WS reconnect —
                 # reconnecting mid-warmup resets the Z-score baseline.
                 while self.state.engine_state == EngineState.WARMING_UP:
