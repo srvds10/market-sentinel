@@ -70,8 +70,10 @@ export default function App() {
       setStatus(prev => ({ ...prev, ...msg }))
       if (msg.spot_ltp) {
         const t = Date.now()
+        const cutoff60s = t - 60_000
         setPriceHistory(prev =>
-          [...prev, { t, spot: msg.spot_ltp!, z: msg.last_z_score ?? 0 }].slice(-900)
+          [...prev, { t, spot: msg.spot_ltp!, z: msg.last_z_score ?? 0 }]
+            .filter(p => p.t >= cutoff60s)
         )
         setPnlHistory(prev =>
           [...prev, { t, pnl: msg.daily_pnl ?? 0 }].slice(-900)
@@ -316,6 +318,7 @@ export default function App() {
             pcr={status.nifty_pcr ?? null}
             sentiment={status.pcr_sentiment ?? 'WAIT'}
             trend={status.pcr_trend ?? 'FLAT'}
+            stale={status.pcr_stale ?? true}
             callOi={status.pcr_call_oi ?? 0}
             putOi={status.pcr_put_oi ?? 0}
           />

@@ -956,6 +956,10 @@ class Engine:
                 "pcr_trend":             self.state.pcr_trend,
                 "pcr_call_oi":           self.state.pcr_call_oi,
                 "pcr_put_oi":            self.state.pcr_put_oi,
+                "pcr_stale": (
+                    self.state.pcr_last_update == 0.0
+                    or (time.monotonic() - self.state.pcr_last_update) > PCR_STALE_SECONDS
+                ),
                 "itm_call_mins":  list(self.state.itm_call_mins),
                 "atm_call_mins":  list(self.state.atm_call_mins),
                 "otm_call_mins":  list(self.state.otm_call_mins),

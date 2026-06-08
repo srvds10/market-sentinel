@@ -24,8 +24,6 @@ export interface StatusPayload {
   warmup_remaining: number
   reconnect_count: number
   instrument_map: InstrumentMap | null
-  server_time: number
-  last_heartbeat: number
   vwap: number | null
   above_vwap: boolean | null
   pressure_verdict: string
@@ -38,6 +36,7 @@ export interface StatusPayload {
   nifty_pcr: number | null
   pcr_sentiment: string
   pcr_trend: string
+  pcr_stale: boolean
   pcr_call_oi: number
   pcr_put_oi: number
   itm_call_mins: number[]

@@ -4,6 +4,7 @@ interface Props {
   pcr: number | null
   sentiment: string
   trend: string
+  stale: boolean
   callOi: number
   putOi: number
 }
@@ -27,9 +28,10 @@ function fmtOi(n: number): string {
   return String(n)
 }
 
-export function PCRGauge({ pcr, sentiment, trend, callOi, putOi }: Props) {
-  const s = SENTIMENT_STYLE[sentiment] ?? SENTIMENT_STYLE.WAIT
-  const t = TREND_STYLE[trend] ?? TREND_STYLE.FLAT
+export function PCRGauge({ pcr, sentiment, trend, stale, callOi, putOi }: Props) {
+  const effectiveSentiment = stale ? 'WAIT' : sentiment
+  const s = SENTIMENT_STYLE[effectiveSentiment] ?? SENTIMENT_STYLE.WAIT
+  const t = stale ? TREND_STYLE.FLAT : (TREND_STYLE[trend] ?? TREND_STYLE.FLAT)
   const total = callOi + putOi
   const callPct = total > 0 ? (callOi / total) * 100 : 50
   const putPct  = total > 0 ? (putOi  / total) * 100 : 50
