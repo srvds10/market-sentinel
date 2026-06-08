@@ -505,19 +505,7 @@ class Engine:
         ):
             skip_reason = f"bias={bias} does not confirm {signal.direction}"
 
-        # --- Gate 2: VWAP direction filter ------------------------------------
-        # CALL only when spot is above the intraday TWAP; PUT only when below.
-        if skip_reason is None and self.state.above_vwap is not None:
-            if signal.direction == "CALL" and not self.state.above_vwap:
-                skip_reason = (
-                    f"CALL blocked — spot {self.state.spot_ltp:.0f} is below "
-                    f"VWAP {self.state.vwap:.0f}"
-                )
-            elif signal.direction == "PUT" and self.state.above_vwap:
-                skip_reason = (
-                    f"PUT blocked — spot {self.state.spot_ltp:.0f} is above "
-                    f"VWAP {self.state.vwap:.0f}"
-                )
+        # --- Gate 2: VWAP — informational only, not a trade filter ------------
 
         # --- Gate 3: option-premium pressure filter ---------------------------
         # BOTH_SQUEEZE = premiums collapsing, don't buy options.
@@ -553,36 +541,7 @@ class Engine:
                     f"(score={self.state.heavyweight_score:.3f})"
                 )
 
-        # --- Gate 5: NIFTY PCR sentiment filter ----------------------------------
-        # PUT_HEAVY  → only PUT allowed.
-        # CALL_HEAVY → only CALL allowed.
-        # BALANCED with RISING trend  → treat as weak PUT_HEAVY (block CALL, allow PUT).
-        # BALANCED with FALLING trend → treat as weak CALL_HEAVY (block PUT, allow CALL).
-        # BALANCED + FLAT, WAIT, and stale readings → block all entries.
-        if skip_reason is None:
-            stale = (
-                self.state.pcr_last_update == 0.0
-                or (time.monotonic() - self.state.pcr_last_update) > PCR_STALE_SECONDS
-            )
-            pcr_sent  = 'WAIT' if stale else self.state.pcr_sentiment
-            pcr_trend = self.state.pcr_trend
-            pcr_val   = f"{self.state.nifty_pcr:.3f}" if self.state.nifty_pcr is not None else "n/a"
-            if stale:
-                skip_reason = f"PCR={pcr_val} stale (>{PCR_STALE_SECONDS:.0f}s) — treating as WAIT"
-            elif pcr_sent == 'WAIT':
-                skip_reason = f"PCR={pcr_val} (WAIT) — no data yet, skip"
-            elif pcr_sent == 'BALANCED':
-                if pcr_trend == 'RISING' and signal.direction == 'CALL':
-                    skip_reason = f"PCR={pcr_val} BALANCED+RISING — put OI building, blocks CALL"
-                elif pcr_trend == 'FALLING' and signal.direction == 'PUT':
-                    skip_reason = f"PCR={pcr_val} BALANCED+FALLING — call OI building, blocks PUT"
-                elif pcr_trend == 'FLAT':
-                    skip_reason = f"PCR={pcr_val} (BALANCED+FLAT) — no directional bias, skip"
-                # BALANCED + trend aligned with signal direction → allow (no skip_reason set)
-            elif pcr_sent == 'PUT_HEAVY' and signal.direction == 'CALL':
-                skip_reason = f"PCR={pcr_val} ({pcr_sent}) blocks CALL entry"
-            elif pcr_sent == 'CALL_HEAVY' and signal.direction == 'PUT':
-                skip_reason = f"PCR={pcr_val} ({pcr_sent}) blocks PUT entry"
+        # --- Gate 5: PCR — informational only, not a trade filter -------------
 
         if skip_reason:
             logger.info("Signal skipped — %s", skip_reason)
