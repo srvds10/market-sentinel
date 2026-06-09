@@ -42,18 +42,17 @@ export function ConfigPanel() {
 
   const handleChange = (section: string, key: string, raw: string) => {
     const field = EDITABLE.find(f => f.section === section && f.key === key)
-    // Store display value as-is; scale is applied only on save
-    const value = field?.type === 'number' ? parseFloat(raw) : raw
-    setCfg(prev => ({ ...prev, [section]: { ...prev[section], [key]: value } }))
+    const displayValue = field?.type === 'number' ? parseFloat(raw) : raw
+    // Store as raw config value (divide by scale) so rendering's multiplication shows correctly
+    const storeValue = (field?.scale && typeof displayValue === 'number')
+      ? displayValue / field.scale
+      : displayValue
+    setCfg(prev => ({ ...prev, [section]: { ...prev[section], [key]: storeValue } }))
   }
 
   const handleSave = async (section: string, key: string) => {
-    const field = EDITABLE.find(f => f.section === section && f.key === key)
-    const displayValue = cfg[section]?.[key]
-    // Convert display value back to raw config (e.g. 30 → 0.30 for pct fields)
-    const value = (field?.scale && typeof displayValue === 'number')
-      ? displayValue / field.scale
-      : displayValue
+    // cfg state always holds raw config values; send directly
+    const value = cfg[section]?.[key]
     setSaving(`${section}.${key}`)
     try {
       await patchConfig(section, key, value)
