@@ -6,6 +6,7 @@ import { ZScoreGauge } from './components/ZScoreGauge'
 import { HeavyweightBar } from './components/HeavyweightBar'
 import { PCRGauge } from './components/PCRGauge'
 import { MarketBias } from './components/MarketBias'
+import { MarketSignal } from './components/MarketSignal'
 import { OptionPressure } from './components/OptionPressure'
 import { SignalFeed } from './components/SignalFeed'
 import { PositionTracker } from './components/PositionTracker'
@@ -207,6 +208,16 @@ export default function App() {
 
         {/* Left: Z-score + signal feed */}
         <aside className="col-span-3 flex flex-col gap-3">
+          <MarketSignal
+            zScore={status.last_z_score ?? null}
+            marketBias={status.market_bias ?? 'UNKNOWN'}
+            aboveVwap={status.above_vwap ?? null}
+            pressureVerdict={status.pressure_verdict ?? 'WAIT'}
+            hwDirection={status.heavyweight_direction ?? 'WAIT'}
+            pcrSentiment={status.pcr_sentiment ?? 'WAIT'}
+            pcrStale={status.pcr_stale ?? true}
+            engineState={status.engine_state ?? 'IDLE'}
+          />
           <div className="rounded-lg border border-border bg-panel p-3 flex flex-col items-center gap-2">
             <ZScoreGauge
               zScore={status.last_z_score ?? null}
