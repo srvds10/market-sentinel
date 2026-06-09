@@ -5,6 +5,8 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+PCR_STALE_SECONDS = 300.0  # must match core/engine.py
+
 router = APIRouter(prefix="/api")
 
 
@@ -54,8 +56,6 @@ async def get_status(request: Request) -> dict:
         "reconnect_count":    state.reconnect_count,
         "instrument_map":     imap,
         "started_at":         state.started_at,
-        "server_time":        time.time(),
-        "last_heartbeat":     state.last_heartbeat,
         "vwap":               state.vwap,
         "above_vwap":         state.above_vwap,
         "pressure_verdict":       state.pressure_verdict,
@@ -64,6 +64,11 @@ async def get_status(request: Request) -> dict:
         "heavyweight_stocks":     list(state.heavyweight_stocks),
         "nifty_pcr":             state.nifty_pcr,
         "pcr_sentiment":         state.pcr_sentiment,
+        "pcr_trend":             state.pcr_trend,
+        "pcr_stale": (
+            state.pcr_last_update == 0.0
+            or (time.monotonic() - state.pcr_last_update) > PCR_STALE_SECONDS
+        ),
         "pcr_call_oi":           state.pcr_call_oi,
         "pcr_put_oi":            state.pcr_put_oi,
         "itm_call_mins":          list(state.itm_call_mins),
