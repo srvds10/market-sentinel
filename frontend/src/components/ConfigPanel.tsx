@@ -25,6 +25,9 @@ const EDITABLE: Array<{
 
 export function ConfigPanel() {
   const [cfg, setCfg]             = useState<ConfigMap>({})
+  // draft: raw strings the user is currently typing, keyed by "section.key".
+  // Kept separate from cfg so React's controlled input never fights keystrokes.
+  const [draft, setDraft]         = useState<Record<string, string>>({})
   const [saving, setSaving]       = useState<string | null>(null)
   const [msg, setMsg]             = useState<{ text: string; ok: boolean } | null>(null)
   const [token, setToken]             = useState('')
@@ -44,29 +47,46 @@ export function ConfigPanel() {
     setTimeout(() => setMsg(null), 3500)
   }
 
+  // Store raw input string — never parse mid-edit, no NaN, no snap-back.
   const handleChange = (section: string, key: string, raw: string) => {
-    const field = EDITABLE.find(f => f.section === section && f.key === key)
-    const displayValue = field?.type === 'number' ? parseFloat(raw) : raw
-    // Ignore NaN (e.g. user cleared the field mid-edit) — keeps last valid value in state
-    if (typeof displayValue === 'number' && isNaN(displayValue)) return
-    // Store as raw config value (divide by scale) so rendering's multiplication shows correctly
-    const storeValue = (field?.scale && typeof displayValue === 'number')
-      ? displayValue / field.scale
-      : displayValue
-    setCfg(prev => ({ ...prev, [section]: { ...prev[section], [key]: storeValue } }))
+    setDraft(prev => ({ ...prev, [`${section}.${key}`]: raw }))
   }
 
   const handleSave = async (section: string, key: string) => {
-    const value = cfg[section]?.[key]
-    // Guard: refuse to save null/undefined/NaN — would corrupt the config yaml
-    if (value === null || value === undefined || (typeof value === 'number' && isNaN(value))) {
+    const field = EDITABLE.find(f => f.section === section && f.key === key)
+    const id = `${section}.${key}`
+    const rawStr = draft[id]  // what the user typed; undefined if never edited
+
+    let value: unknown
+    if (rawStr !== undefined) {
+      // User edited this field — parse and validate now
+      if (field?.type === 'number') {
+        const n = parseFloat(rawStr)
+        if (!rawStr.trim() || isNaN(n)) {
+          flash('✗ Enter a value before saving', false)
+          return
+        }
+        value = field.scale ? n / field.scale : n
+      } else {
+        value = rawStr
+      }
+    } else {
+      // Field was never edited — use existing cfg value
+      value = cfg[section]?.[key]
+    }
+
+    if (value === null || value === undefined || (typeof value === 'number' && isNaN(value as number))) {
       flash('✗ Enter a value before saving', false)
       return
     }
-    setSaving(`${section}.${key}`)
+
+    setSaving(id)
     try {
       await patchConfig(section, key, value)
-      flash(`✓ Saved`, true)
+      // Commit parsed value into cfg and clear the draft for this field
+      setCfg(prev => ({ ...prev, [section]: { ...prev[section], [key]: value } }))
+      setDraft(prev => { const n = { ...prev }; delete n[id]; return n })
+      flash('✓ Saved', true)
     } catch (e: unknown) {
       flash(`✗ ${e instanceof Error ? e.message : String(e)}`, false)
     } finally {
@@ -168,12 +188,17 @@ export function ConfigPanel() {
       <div className="flex flex-col gap-2">
         <div className="text-muted uppercase tracking-wider text-[10px]">Engine Parameters</div>
         {EDITABLE.map(({ section, key, label, type, scale, placeholder }) => {
-          const raw = cfg[section]?.[key]
-          const displayed = (scale && typeof raw === 'number') ? raw * scale : raw
-          // Show empty string when value is missing/null so placeholder is visible
-          const val = (displayed === null || displayed === undefined) ? '' : String(displayed)
           const id  = `${section}.${key}`
-          const missing = val === ''
+          // While the user is typing, show their raw draft string unchanged.
+          // Otherwise compute the display value from cfg (apply scale for pct fields).
+          const val = draft[id] !== undefined
+            ? draft[id]
+            : (() => {
+                const raw = cfg[section]?.[key]
+                const displayed = (scale && typeof raw === 'number') ? raw * scale : raw
+                return (displayed === null || displayed === undefined) ? '' : String(displayed)
+              })()
+          const missing = val === '' && draft[id] === undefined
           return (
             <div key={id} className="flex items-center gap-2">
               <label className={clsx('w-44 shrink-0 leading-tight', missing ? 'text-warn' : 'text-muted')}>
