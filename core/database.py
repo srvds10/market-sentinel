@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS trades (
     capital_at_risk REAL NOT NULL,
     z_score_entry   REAL NOT NULL,
     stop_loss       REAL NOT NULL,
-    exit_reason     TEXT,              -- STOP_LOSS | TRAILING | DIVERGENCE | TIME | KILL
+    take_profit     REAL NOT NULL DEFAULT 0.0,
+    exit_reason     TEXT,              -- STOP_LOSS | TAKE_PROFIT | DIVERGENCE | TIME_STOP | KILL_SWITCH
     pnl             REAL,
     pnl_pct         REAL
 );
@@ -81,6 +82,7 @@ class Database:
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA)
         await self._db.commit()
+        await self._migrate()
         logger.info("Database opened: %s", self._path)
 
     async def close(self) -> None:
@@ -96,9 +98,9 @@ class Database:
         await self._execute(
             """INSERT INTO trades
                (id, opened_at, symbol, direction, entry_price,
-                qty, capital_at_risk, z_score_entry, stop_loss)
+                qty, capital_at_risk, z_score_entry, stop_loss, take_profit)
                VALUES (:id, :opened_at, :symbol, :direction, :entry_price,
-                       :qty, :capital_at_risk, :z_score_entry, :stop_loss)""",
+                       :qty, :capital_at_risk, :z_score_entry, :stop_loss, :take_profit)""",
             trade,
         )
 
@@ -194,6 +196,17 @@ class Database:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    async def _migrate(self) -> None:
+        """Add columns introduced after initial deployment (safe to re-run)."""
+        for ddl in [
+            "ALTER TABLE trades ADD COLUMN take_profit REAL NOT NULL DEFAULT 0.0",
+        ]:
+            try:
+                await self._db.execute(ddl)
+                await self._db.commit()
+            except Exception:
+                pass  # column already exists
 
     async def _execute(self, sql: str, params: Any = ()) -> None:
         await self._db.execute(sql, params)

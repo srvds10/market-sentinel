@@ -49,28 +49,23 @@ class TestExecutionEngine:
         assert closed.pnl < 0
         assert exec_engine.open_trade is None
 
-    def test_trailing_stop(self, exec_engine: ExecutionEngine):
+    def test_take_profit_exit(self, exec_engine: ExecutionEngine):
         exec_engine.reset_day()
         exec_engine.try_open(make_signal(), atm_ltp=100.0, atm_symbol="ATM-CE")
-
-        # Price runs up 25% — activates trailing (activation at +20%)
-        exec_engine.on_tick("ATM-CE", 125.0)
-        assert exec_engine.open_trade.trailing_active is True
-
-        # Peak is 125; trail floor = 125 * (1 - 0.15) = 106.25
-        closed = exec_engine.on_tick("ATM-CE", 106.0)
+        # SL distance = 100 * 0.30 = 30; TP = 100 + 3*30 = 190
+        assert exec_engine.open_trade.take_profit == pytest.approx(190.0)
+        closed = exec_engine.on_tick("ATM-CE", 190.0)
         assert closed is not None
-        assert closed.exit_reason == ExitReason.TRAILING_STOP
+        assert closed.exit_reason == ExitReason.TAKE_PROFIT
         assert closed.pnl > 0
 
-    def test_trailing_stop_not_triggered_before_activation(self, exec_engine: ExecutionEngine):
+    def test_take_profit_not_triggered_before_target(self, exec_engine: ExecutionEngine):
         exec_engine.reset_day()
         exec_engine.try_open(make_signal(), atm_ltp=100.0, atm_symbol="ATM-CE")
-
-        # Price goes up only 10% — trailing NOT active yet
-        result = exec_engine.on_tick("ATM-CE", 110.0)
+        # Price at 150 — below TP of 190, above SL of 70
+        result = exec_engine.on_tick("ATM-CE", 150.0)
         assert result is None
-        assert exec_engine.open_trade.trailing_active is False
+        assert exec_engine.open_trade is not None
 
     def test_divergence_collapse_exit(self, exec_engine: ExecutionEngine):
         exec_engine.reset_day()
@@ -149,7 +144,7 @@ class TestExecutionEngine:
 def _engine(**overrides) -> ExecutionEngine:
     cfg = ExecutionConfig(
         virtual_capital=100_000.0, max_position_pct=0.20, stop_loss_pct=0.30,
-        trailing_stop_activation_pct=0.20, trailing_stop_pct=0.15,
+        target_ratio=3.0,
         cooldown_minutes=0.0, morning_filter_start="00:00", morning_filter_end="00:00",
         last_entry_time="23:59", force_close_time="23:59", daily_drawdown_kill_pct=0.40, lot_size=50,
         slippage_rupees=0.0, scale_by_zscore=False,

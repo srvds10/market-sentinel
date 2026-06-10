@@ -29,8 +29,7 @@ def exec_engine():
         virtual_capital=100_000.0,
         max_position_pct=0.20,
         stop_loss_pct=0.30,
-        trailing_stop_activation_pct=0.20,
-        trailing_stop_pct=0.15,
+        target_ratio=3.0,
         cooldown_minutes=0.0,    # disabled for fast tests
         morning_filter_start="00:00",
         morning_filter_end="00:00",   # no opening blackout — trading allowed all day

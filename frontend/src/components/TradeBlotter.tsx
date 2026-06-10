@@ -21,11 +21,11 @@ function fmtDate(ts: number | null) {
 }
 
 const EXIT_COLORS: Record<string, string> = {
-  STOP_LOSS:      'text-bear',
-  TRAILING_STOP:  'text-bull',
-  DIVERGENCE:     'text-accent',
-  TIME_STOP:      'text-muted',
-  KILL_SWITCH:    'text-warn',
+  STOP_LOSS:    'text-bear',
+  TAKE_PROFIT:  'text-bull',
+  DIVERGENCE:   'text-accent',
+  TIME_STOP:    'text-muted',
+  KILL_SWITCH:  'text-warn',
 }
 
 function downloadCSV(trades: Trade[]) {
