@@ -66,7 +66,9 @@ export function PositionTracker({ trade, atm_call_ltp, atm_put_ltp }: Props) {
         <div className="text-right text-bear">₹{fmt(trade.stop_loss)}</div>
 
         <div className="text-muted">Take Profit</div>
-        <div className="text-right text-bull">₹{fmt(trade.take_profit)}</div>
+        <div className="text-right text-bull">
+          {trade.take_profit > 0 ? `₹${fmt(trade.take_profit)}` : '—'}
+        </div>
 
         <div className="text-muted">Z at entry</div>
         <div className="text-right text-warn">{trade.z_score_entry.toFixed(3)}</div>

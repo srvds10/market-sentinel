@@ -205,8 +205,9 @@ class Database:
             try:
                 await self._db.execute(ddl)
                 await self._db.commit()
-            except Exception:
-                pass  # column already exists
+            except Exception as exc:
+                if "duplicate column" not in str(exc).lower() and "already exists" not in str(exc).lower():
+                    logger.warning("Migration DDL failed unexpectedly: %s — %s", ddl, exc)
 
     async def _execute(self, sql: str, params: Any = ()) -> None:
         await self._db.execute(sql, params)
