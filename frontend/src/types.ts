@@ -39,6 +39,11 @@ export interface StatusPayload {
   pcr_stale: boolean
   pcr_call_oi: number
   pcr_put_oi: number
+  morning_verdict: string
+  straddle_drift_pct: number | null
+  option_efficiency: number | null
+  morning_snap_taken: boolean
+  morning_straddle_open: number
   itm_call_mins: number[]
   atm_call_mins: number[]
   otm_call_mins: number[]

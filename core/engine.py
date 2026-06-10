@@ -110,6 +110,17 @@ class AppState:
     atm_put_mins:  list[float] = field(default_factory=list)
     itm_put_mins:  list[float] = field(default_factory=list)
 
+    # Morning check — straddle drift from open to detect IV crush / theta-heavy days
+    morning_snap_taken:    bool  = False
+    morning_snap_time:     float = 0.0
+    morning_straddle_open: float = 0.0   # ATM call + ATM put at open snap
+    morning_spot_open:     float = 0.0
+    morning_atm_call_open: float = 0.0
+    morning_atm_put_open:  float = 0.0
+    straddle_drift_pct:    float | None = None
+    option_efficiency:     float | None = None   # call % move / spot % move
+    morning_verdict:       str = 'WAIT'          # WAIT | BUY_OK | CAUTION | AVOID
+
     # broadcast queue: engine writes, FastAPI WS broadcaster reads
     broadcast_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     # set by /api/token to trigger immediate WS reconnect
@@ -624,9 +635,9 @@ class Engine:
                 )
         elif tick.symbol == imap.atm_call.symbol:
             self.state.atm_ltp = tick.ltp
-            # OTM call collapses to same strike as ATM when grid is at edge
             if imap.otm_call.symbol == imap.atm_call.symbol:
                 self.state.otm_call_ltp = tick.ltp
+            self._update_morning_check()
         elif tick.symbol == imap.atm_put.symbol:
             self.state.atm_put_ltp = tick.ltp
             # OTM put collapses to same strike as ATM when grid is at edge
@@ -895,6 +906,84 @@ class Engine:
             except Exception as exc:
                 logger.warning("PCR poll error: %s", repr(exc))
 
+    def _update_morning_check(self) -> None:
+        """Snapshot ATM straddle at 09:16-09:22 and track drift throughout the day.
+
+        Straddle = ATM call + ATM put.  A falling straddle means IV/theta is eating
+        premium faster than the directional move — a signal that buying options is
+        expensive and risky that day.
+
+        Verdicts:
+          WAIT    — snap not yet taken (before 09:16 or prices missing)
+          BUY_OK  — straddle drift > −3 %  (options responsive)
+          CAUTION — drift −3 % to −8 %     (modest decay, trade carefully)
+          AVOID   — drift < −8 %            (IV crushed, avoid buying)
+        """
+        SNAP_START = 9 * 60 + 16   # 09:16 IST
+        SNAP_END   = 9 * 60 + 22   # 09:22 IST — latest we'll accept a snap
+
+        atm_call = self.state.atm_ltp
+        atm_put  = self.state.atm_put_ltp
+        spot     = self.state.spot_ltp
+        if atm_call <= 0 or atm_put <= 0 or spot <= 0:
+            return
+
+        now_min = ist_minutes_now()
+        straddle = atm_call + atm_put
+
+        # Reset snap daily: if snap is older than 24 h or it's before snap window today
+        if self.state.morning_snap_taken:
+            stale = (time.time() - self.state.morning_snap_time) > 86_400
+            new_day = (now_min < SNAP_START and
+                       time.time() - self.state.morning_snap_time > 3_600)
+            if stale or new_day:
+                self.state.morning_snap_taken = False
+                self.state.morning_verdict    = 'WAIT'
+                self.state.straddle_drift_pct = None
+                self.state.option_efficiency  = None
+
+        # Take snapshot once inside the window
+        if not self.state.morning_snap_taken and SNAP_START <= now_min <= SNAP_END:
+            self.state.morning_snap_taken    = True
+            self.state.morning_snap_time     = time.time()
+            self.state.morning_straddle_open = straddle
+            self.state.morning_spot_open     = spot
+            self.state.morning_atm_call_open = atm_call
+            self.state.morning_atm_put_open  = atm_put
+            logger.info(
+                "Morning snap: spot=%.2f  ATM call=%.2f  ATM put=%.2f  straddle=%.2f",
+                spot, atm_call, atm_put, straddle,
+            )
+            return
+
+        if not self.state.morning_snap_taken:
+            return
+
+        # Straddle drift %
+        s_open = self.state.morning_straddle_open
+        if s_open <= 0:
+            return
+        drift = (straddle - s_open) / s_open * 100.0
+        self.state.straddle_drift_pct = round(drift, 2)
+
+        if drift > -3.0:
+            self.state.morning_verdict = 'BUY_OK'
+        elif drift > -8.0:
+            self.state.morning_verdict = 'CAUTION'
+        else:
+            self.state.morning_verdict = 'AVOID'
+
+        # Option efficiency: call % move ÷ spot % move (directional responsiveness)
+        spot_open = self.state.morning_spot_open
+        call_open = self.state.morning_atm_call_open
+        if spot_open > 0 and call_open > 0:
+            spot_move = (spot - spot_open) / spot_open * 100.0
+            call_move = (atm_call - call_open) / call_open * 100.0
+            if abs(spot_move) >= 0.15:   # only meaningful when spot has moved
+                self.state.option_efficiency = round(call_move / spot_move, 2)
+            else:
+                self.state.option_efficiency = None
+
     async def _heartbeat(self) -> None:
         while True:
             self.state.last_heartbeat = time.time()
@@ -959,6 +1048,11 @@ class Engine:
                 "otm_put_mins":   list(self.state.otm_put_mins),
                 "atm_put_mins":   list(self.state.atm_put_mins),
                 "itm_put_mins":   list(self.state.itm_put_mins),
+                "morning_verdict":       self.state.morning_verdict,
+                "straddle_drift_pct":    self.state.straddle_drift_pct,
+                "option_efficiency":     self.state.option_efficiency,
+                "morning_snap_taken":    self.state.morning_snap_taken,
+                "morning_straddle_open": self.state.morning_straddle_open,
             })
             await asyncio.sleep(2.0)
 

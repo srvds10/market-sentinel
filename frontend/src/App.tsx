@@ -7,6 +7,7 @@ import { HeavyweightBar } from './components/HeavyweightBar'
 import { PCRGauge } from './components/PCRGauge'
 import { MarketBias } from './components/MarketBias'
 import { MarketSignal } from './components/MarketSignal'
+import { MorningCheck } from './components/MorningCheck'
 import { OptionPressure } from './components/OptionPressure'
 import { SignalFeed } from './components/SignalFeed'
 import { PositionTracker } from './components/PositionTracker'
@@ -217,6 +218,13 @@ export default function App() {
             pcrSentiment={status.pcr_sentiment ?? 'WAIT'}
             pcrStale={status.pcr_stale ?? true}
             engineState={status.engine_state ?? 'IDLE'}
+          />
+          <MorningCheck
+            verdict={status.morning_verdict ?? 'WAIT'}
+            driftPct={status.straddle_drift_pct ?? null}
+            efficiency={status.option_efficiency ?? null}
+            snapTaken={status.morning_snap_taken ?? false}
+            straddleOpen={status.morning_straddle_open ?? 0}
           />
           <div className="rounded-lg border border-border bg-panel p-3 flex flex-col items-center gap-2">
             <ZScoreGauge
