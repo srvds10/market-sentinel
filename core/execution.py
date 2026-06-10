@@ -2,7 +2,7 @@
 Paper-trade execution engine.
 
 State machine per trade:
-  OPEN  →  CLOSED (exit reason: STOP_LOSS | TRAILING_STOP | DIVERGENCE | TIME_STOP | KILL_SWITCH)
+  OPEN  →  CLOSED (exit reason: STOP_LOSS | TAKE_PROFIT | DIVERGENCE | TIME_STOP | KILL_SWITCH)
 
 Guards (all time checks evaluated in IST, not server-local time):
   - Opening blackout: no new trades during 09:15-morning_filter_end
@@ -33,11 +33,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class ExitReason(str, Enum):
-    STOP_LOSS         = "STOP_LOSS"
-    TRAILING_STOP     = "TRAILING_STOP"
-    DIVERGENCE        = "DIVERGENCE"
-    TIME_STOP         = "TIME_STOP"
-    KILL_SWITCH       = "KILL_SWITCH"
+    STOP_LOSS    = "STOP_LOSS"
+    TAKE_PROFIT  = "TAKE_PROFIT"
+    DIVERGENCE   = "DIVERGENCE"
+    TIME_STOP    = "TIME_STOP"
+    KILL_SWITCH  = "KILL_SWITCH"
 
 
 class EngineBlock(str, Enum):
@@ -64,11 +64,8 @@ class PaperTrade:
     qty: int
     capital_at_risk: float  # ₹ allocated (entry_price * qty * lot_size)
     z_score_entry: float
-    stop_loss: float                    # absolute price floor
-    trailing_high: float                # running peak (for trailing stop)
-    trailing_active: bool               # True once profit >= activation threshold
-    trailing_stop_pct: float = 0.15     # snapshotted from config at open time
-    trailing_activation_pct: float = 0.20
+    stop_loss: float        # absolute price floor
+    take_profit: float      # absolute price target (entry + target_ratio × SL_distance)
     closed_at: float | None = None
     exit_price: float | None = None
     exit_reason: ExitReason | None = None
@@ -88,6 +85,7 @@ class PaperTrade:
             "capital_at_risk":  self.capital_at_risk,
             "z_score_entry":    self.z_score_entry,
             "stop_loss":        self.stop_loss,
+            "take_profit":      self.take_profit,
             "exit_reason":      self.exit_reason.value if self.exit_reason else None,
             "pnl":              self.pnl,
             "pnl_pct":          self.pnl_pct,
@@ -99,10 +97,8 @@ class ExecutionConfig:
     virtual_capital: float = 100_000.0
     max_position_pct: float = 0.20
     stop_loss_pct: float = 0.30
-    trailing_stop_activation_pct: float = 0.20
-    trailing_stop_pct: float = 0.15
+    target_ratio: float = 3.0       # take-profit = entry + target_ratio × SL_distance
     cooldown_minutes: float = 15.0
-    min_hold_minutes: float = 3.0   # divergence exit blocked for this long after open
     morning_filter_start: str = "09:15"
     morning_filter_end: str = "09:30"
     last_entry_time: str = "14:00"  # no new trades opened after this time
@@ -256,7 +252,9 @@ class ExecutionEngine:
             qty = max_lots
 
         actual_risk = qty * entry_price * self.config.lot_size
-        stop_loss = entry_price * (1.0 - self.config.stop_loss_pct)
+        sl_distance = entry_price * self.config.stop_loss_pct
+        stop_loss   = entry_price - sl_distance
+        take_profit = entry_price + self.config.target_ratio * sl_distance
 
         trade = PaperTrade(
             id=str(uuid.uuid4())[:8],
@@ -268,16 +266,13 @@ class ExecutionEngine:
             capital_at_risk=actual_risk,
             z_score_entry=signal.z_score,
             stop_loss=stop_loss,
-            trailing_high=entry_price,
-            trailing_active=False,
-            trailing_stop_pct=self.config.trailing_stop_pct,
-            trailing_activation_pct=self.config.trailing_stop_activation_pct,
+            take_profit=take_profit,
         )
         self._open_trade = trade
         logger.info(
-            "PAPER OPEN  %s  %s @ ₹%.2f (LTP %.2f + slip %.2f)  qty=%d  SL=₹%.2f  Z=%.2f",
-            trade.id, trade.symbol, entry_price, atm_ltp,
-            self.config.slippage_rupees, qty, stop_loss, signal.z_score,
+            "PAPER OPEN  %s  %s @ ₹%.2f  qty=%d  SL=₹%.2f  TP=₹%.2f (1:%.0f)  Z=%.2f",
+            trade.id, trade.symbol, entry_price, qty,
+            stop_loss, take_profit, self.config.target_ratio, signal.z_score,
         )
         return trade
 
@@ -291,31 +286,15 @@ class ExecutionEngine:
         if trade is None or trade.symbol != symbol:
             return None
 
-        # --- update trailing high ---
-        if ltp > trade.trailing_high:
-            self._open_trade = PaperTrade(
-                **{**trade.__dict__, "trailing_high": ltp,
-                   "trailing_active": trade.trailing_active or self._trailing_activated(trade, ltp)}
-            )
-            trade = self._open_trade
-
-        # --- trailing stop check ---
-        if trade.trailing_active:
-            trail_floor = trade.trailing_high * (1.0 - trade.trailing_stop_pct)
-            if ltp <= trail_floor:
-                return self._close(ltp, ExitReason.TRAILING_STOP)
+        # --- take profit (1:target_ratio) ---
+        if ltp >= trade.take_profit:
+            return self._close(ltp, ExitReason.TAKE_PROFIT)
 
         # --- hard stop loss ---
         if ltp <= trade.stop_loss:
             return self._close(ltp, ExitReason.STOP_LOSS)
 
         return None
-
-    def _trailing_activated(self, trade: PaperTrade, ltp: float) -> bool:
-        if trade.entry_price <= 0:
-            return False
-        profit_pct = (ltp - trade.entry_price) / trade.entry_price
-        return profit_pct >= trade.trailing_activation_pct
 
     # ------------------------------------------------------------------
     # Named exit triggers

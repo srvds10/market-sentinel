@@ -59,6 +59,7 @@ export interface Trade {
   capital_at_risk: number
   z_score_entry: number
   stop_loss: number
+  take_profit: number
   exit_reason: string | null
   pnl: number | null
   pnl_pct: number | null

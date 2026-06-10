@@ -222,8 +222,7 @@ class Engine:
             virtual_capital=exc_cfg["virtual_capital"],
             max_position_pct=exc_cfg["max_position_pct"],
             stop_loss_pct=exc_cfg["stop_loss_pct"],
-            trailing_stop_activation_pct=exc_cfg["trailing_stop_activation_pct"],
-            trailing_stop_pct=exc_cfg["trailing_stop_pct"],
+            target_ratio=exc_cfg.get("target_ratio", 3.0),
             cooldown_minutes=exc_cfg["cooldown_minutes"],
             morning_filter_start=exc_cfg["morning_filter_start"],
             morning_filter_end=exc_cfg["morning_filter_end"],
@@ -234,7 +233,6 @@ class Engine:
             slippage_rupees=exc_cfg.get("slippage_rupees", 2.0),
             scale_by_zscore=exc_cfg.get("scale_by_zscore", True),
             scale_zscore_per_lot=exc_cfg.get("scale_zscore_per_lot", 1.5),
-            min_hold_minutes=exc_cfg.get("min_hold_minutes", 3.0),
         ))
 
         dhan_cfg = self._cfg["dhan"]
@@ -451,19 +449,14 @@ class Engine:
                 await self._on_signal(signal)
 
             # Divergence collapse: Z-score has dropped back below the threshold
-            # while a trade is still open → exit the position.
-            # Guarded by min_hold_minutes to prevent immediate exit when the
-            # Z-score dips briefly at the threshold boundary right after entry.
+            # while a trade is still open → exit the position immediately.
             open_trade = self._execution_engine.open_trade
             if open_trade and signal is None:
                 current_z = self._signal_engine.current_z_score()
                 threshold = self._signal_engine.config.zscore_threshold
                 atm_ltp_now = (self.state.atm_ltp if open_trade.direction == "CALL"
                                else self.state.atm_put_ltp)
-                min_hold = self._execution_engine.config.min_hold_minutes * 60.0
-                held_long_enough = (time.time() - open_trade.opened_at) >= min_hold
-                if (held_long_enough
-                        and current_z is not None
+                if (current_z is not None
                         and current_z < threshold
                         and atm_ltp_now > 0):
                     closed = self._execution_engine.on_divergence_collapse(atm_ltp_now)

@@ -26,12 +26,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 MUTABLE_KEYS = {
-    ("signal", "zscore_threshold"),
-    ("signal", "min_spot_delta"),
-    ("signal", "zscore_lookback_minutes"),
+    ("signal",    "zscore_threshold"),
+    ("signal",    "min_spot_delta"),
+    ("signal",    "zscore_lookback_minutes"),
     ("execution", "stop_loss_pct"),
-    ("execution", "trailing_stop_activation_pct"),
-    ("execution", "trailing_stop_pct"),
+    ("execution", "target_ratio"),
     ("execution", "cooldown_minutes"),
     ("execution", "daily_drawdown_kill_pct"),
     ("execution", "last_entry_time"),
