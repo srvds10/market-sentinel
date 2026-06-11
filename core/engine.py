@@ -459,21 +459,6 @@ class Engine:
             if signal:
                 await self._on_signal(signal)
 
-            # Divergence collapse: Z-score has dropped back below the threshold
-            # while a trade is still open → exit the position immediately.
-            open_trade = self._execution_engine.open_trade
-            if open_trade and signal is None:
-                current_z = self._signal_engine.current_z_score()
-                threshold = self._signal_engine.config.zscore_threshold
-                atm_ltp_now = (self.state.atm_ltp if open_trade.direction == "CALL"
-                               else self.state.atm_put_ltp)
-                if (current_z is not None
-                        and current_z < threshold
-                        and atm_ltp_now > 0):
-                    closed = self._execution_engine.on_divergence_collapse(atm_ltp_now)
-                    if closed:
-                        await self._on_trade_close(closed)
-
             self._sync_state()
 
     # ------------------------------------------------------------------

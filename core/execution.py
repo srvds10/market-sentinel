@@ -2,7 +2,7 @@
 Paper-trade execution engine.
 
 State machine per trade:
-  OPEN  →  CLOSED (exit reason: STOP_LOSS | TAKE_PROFIT | DIVERGENCE | TIME_STOP | KILL_SWITCH)
+  OPEN  →  CLOSED (exit reason: STOP_LOSS | TAKE_PROFIT | TIME_STOP | KILL_SWITCH)
 
 Guards (all time checks evaluated in IST, not server-local time):
   - Opening blackout: no new trades during 09:15-morning_filter_end
@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 class ExitReason(str, Enum):
     STOP_LOSS    = "STOP_LOSS"
     TAKE_PROFIT  = "TAKE_PROFIT"
-    DIVERGENCE   = "DIVERGENCE"
     TIME_STOP    = "TIME_STOP"
     KILL_SWITCH  = "KILL_SWITCH"
 
@@ -126,7 +125,6 @@ class ExecutionEngine:
       try_open(signal, atm_ltp)   — attempt to open after guards pass
       on_tick(symbol, ltp)        — feed latest price for open trade
       check_time_stop()           — call on every tick or timer
-      on_divergence_collapse()    — call when Z-score drops below threshold
 
     Returns closed PaperTrade objects; callers persist them via Database.
     """
@@ -299,11 +297,6 @@ class ExecutionEngine:
     # ------------------------------------------------------------------
     # Named exit triggers
     # ------------------------------------------------------------------
-
-    def on_divergence_collapse(self, ltp: float) -> Optional[PaperTrade]:
-        if self._open_trade is None:
-            return None
-        return self._close(ltp, ExitReason.DIVERGENCE)
 
     def check_time_stop(self, atm_ltp: float) -> Optional[PaperTrade]:
         if self._open_trade is None:

@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS trades (
     z_score_entry   REAL NOT NULL,
     stop_loss       REAL NOT NULL,
     take_profit     REAL NOT NULL DEFAULT 0.0,
-    exit_reason     TEXT,              -- STOP_LOSS | TAKE_PROFIT | DIVERGENCE | TIME_STOP | KILL_SWITCH
+    exit_reason     TEXT,              -- STOP_LOSS | TAKE_PROFIT | TIME_STOP | KILL_SWITCH
     pnl             REAL,
     pnl_pct         REAL
 );

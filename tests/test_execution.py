@@ -67,14 +67,6 @@ class TestExecutionEngine:
         assert result is None
         assert exec_engine.open_trade is not None
 
-    def test_divergence_collapse_exit(self, exec_engine: ExecutionEngine):
-        exec_engine.reset_day()
-        exec_engine.try_open(make_signal(), atm_ltp=100.0, atm_symbol="ATM-CE")
-        closed = exec_engine.on_divergence_collapse(ltp=105.0)
-        assert closed is not None
-        assert closed.exit_reason == ExitReason.DIVERGENCE
-        assert closed.pnl > 0
-
     def test_time_stop(self, exec_engine: ExecutionEngine):
         exec_engine.reset_day()
         exec_engine.try_open(make_signal(), atm_ltp=100.0, atm_symbol="ATM-CE")
@@ -122,9 +114,9 @@ class TestExecutionEngine:
         trade = exec_engine.try_open(make_signal(), atm_ltp=100.0, atm_symbol="ATM-CE")
         assert trade is not None
         qty = trade.qty
-        closed = exec_engine.on_divergence_collapse(ltp=110.0)
+        closed = exec_engine.on_tick("ATM-CE", 190.0)   # take profit hit
         assert closed is not None
-        expected_pnl = (110.0 - 100.0) * qty * 50
+        expected_pnl = (190.0 - 100.0) * qty * 50
         assert closed.pnl == pytest.approx(expected_pnl, rel=0.01)
 
     def test_warmup_blocks_trades(self, exec_engine: ExecutionEngine):
