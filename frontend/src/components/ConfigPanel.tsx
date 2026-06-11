@@ -20,6 +20,8 @@ const EDITABLE: Array<{
   { section: 'execution', key: 'cooldown_minutes',              label: 'Cooldown (min)',           type: 'number', placeholder: '15'    },
   { section: 'execution', key: 'daily_drawdown_kill_pct',       label: 'Kill switch drawdown %',  type: 'number', scale: 100, placeholder: '40' },
   { section: 'execution', key: 'last_entry_time',               label: 'Last entry time (HH:MM)', type: 'text',   placeholder: '14:00' },
+  { section: 'execution', key: 'morning_filter_start',          label: 'Morning filter start (HH:MM)', type: 'text', placeholder: '09:15' },
+  { section: 'execution', key: 'morning_filter_end',            label: 'Morning filter end (HH:MM)',   type: 'text', placeholder: '09:30' },
 ]
 
 export function ConfigPanel() {
