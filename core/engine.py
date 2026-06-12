@@ -717,11 +717,14 @@ class Engine:
         from itertools import zip_longest
 
         dhan = self._cfg["dhan"]
-        headers = {
-            "access-token":  dhan.get("access_token", ""),
-            "client-id":     dhan.get("client_id", ""),
-            "Content-Type":  "application/json",
-        }
+        client_id = dhan.get("client_id", "")
+
+        def _headers() -> dict:
+            return {
+                "access-token": self._cfg["dhan"].get("access_token", ""),
+                "client-id":    client_id,
+                "Content-Type": "application/json",
+            }
 
         # Returns (sid, is_call, oi, http_status) so the caller can distinguish
         # 429 rate-limits from 401 auth errors without re-fetching.
@@ -731,7 +734,7 @@ class Engine:
             try:
                 r = await client.post(
                     "https://api.dhan.co/v2/charts/intraday",
-                    headers=headers,
+                    headers=_headers(),
                     json={
                         "securityId":      sid,
                         "exchangeSegment": "NSE_FNO",
@@ -764,7 +767,16 @@ class Engine:
         consecutive_auth_failures = 0
         pcr_history: deque[float] = deque(maxlen=6)  # last 6 successful PCR readings
 
+        last_token = self._cfg["dhan"].get("access_token", "")
+
         while True:
+            # Reset backoff immediately when the token is hot-updated via /api/token.
+            current_token = self._cfg["dhan"].get("access_token", "")
+            if current_token != last_token:
+                consecutive_auth_failures = 0
+                last_token = current_token
+                logger.info("PCR poll: token updated — resetting auth backoff")
+
             # After repeated real 401s, back off to 10 minutes.
             # 429 rate-limit hits are handled per-poll and do NOT affect this counter.
             sleep_secs = 600.0 if consecutive_auth_failures >= 2 else 60.0
