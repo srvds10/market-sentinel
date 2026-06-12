@@ -185,6 +185,38 @@ def _group_pressure(pressures: list[str]) -> str:
     return 'FLAT'
 
 
+_SIGNAL_FLIP_THRESHOLD = 4  # ±4 out of max ±6 triggers an opposite-signal exit
+
+
+def _composite_market_score(state: "AppState") -> int:
+    """Weighted directional composite used for the signal-flip exit.
+
+    Z-score and market-bias carry weight 2; VWAP and option pressure carry 1.
+    Max absolute score = 6.  Positive → bullish, negative → bearish.
+    """
+    score = 0
+    z = state.last_z_score
+    if z is not None:
+        if z >= 2.0:
+            score += 2
+        elif z <= -2.0:
+            score -= 2
+    if state.market_bias == "BULLISH":
+        score += 2
+    elif state.market_bias == "BEARISH":
+        score -= 2
+    if state.above_vwap is True:
+        score += 1
+    elif state.above_vwap is False:
+        score -= 1
+    pv = state.pressure_verdict
+    if pv in ("CALL_DOMINANT", "CALL_HEAVY"):
+        score += 1
+    elif pv in ("PUT_DOMINANT", "PUT_HEAVY"):
+        score -= 1
+    return score
+
+
 def _compute_pressure_verdict(call_g: str, put_g: str) -> str:
     if call_g == 'WAIT' and put_g == 'WAIT':
         return 'WAIT'
@@ -458,6 +490,26 @@ class Engine:
             # New signal?
             if signal:
                 await self._on_signal(signal)
+
+            # Signal-flip exit: composite market score strongly opposing the trade.
+            # Needs ≥4 points opposite to trade direction (e.g. z=-2 + bias=-2, or
+            # bias=-2 + vwap=-1 + pressure=-1) before the position is closed.
+            open_trade = self._execution_engine.open_trade
+            if open_trade:
+                score = _composite_market_score(self.state)
+                atm_ltp_now = (self.state.atm_ltp if open_trade.direction == "CALL"
+                               else self.state.atm_put_ltp)
+                if atm_ltp_now > 0:
+                    if open_trade.direction == "CALL" and score <= -_SIGNAL_FLIP_THRESHOLD:
+                        closed = self._execution_engine.on_signal_flip(atm_ltp_now)
+                        if closed:
+                            logger.info("Signal-flip exit (CALL): composite score=%d", score)
+                            await self._on_trade_close(closed)
+                    elif open_trade.direction == "PUT" and score >= _SIGNAL_FLIP_THRESHOLD:
+                        closed = self._execution_engine.on_signal_flip(atm_ltp_now)
+                        if closed:
+                            logger.info("Signal-flip exit (PUT): composite score=%d", score)
+                            await self._on_trade_close(closed)
 
             self._sync_state()
 

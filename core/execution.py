@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 class ExitReason(str, Enum):
     STOP_LOSS    = "STOP_LOSS"
     TAKE_PROFIT  = "TAKE_PROFIT"
+    SIGNAL_FLIP  = "SIGNAL_FLIP"
     TIME_STOP    = "TIME_STOP"
     KILL_SWITCH  = "KILL_SWITCH"
 
@@ -297,6 +298,11 @@ class ExecutionEngine:
     # ------------------------------------------------------------------
     # Named exit triggers
     # ------------------------------------------------------------------
+
+    def on_signal_flip(self, ltp: float) -> Optional[PaperTrade]:
+        if self._open_trade is None:
+            return None
+        return self._close(ltp, ExitReason.SIGNAL_FLIP)
 
     def check_time_stop(self, atm_ltp: float) -> Optional[PaperTrade]:
         if self._open_trade is None:
