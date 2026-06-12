@@ -23,7 +23,6 @@ function fmtDate(ts: number | null) {
 const EXIT_COLORS: Record<string, string> = {
   STOP_LOSS:    'text-bear',
   TAKE_PROFIT:  'text-bull',
-  DIVERGENCE:   'text-accent',
   SIGNAL_FLIP:  'text-warn',
   TIME_STOP:    'text-muted',
   KILL_SWITCH:  'text-warn',
